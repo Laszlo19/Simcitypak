@@ -968,6 +968,13 @@
     <Resource Include="Images\LotEditor\GroundTextures\8.png" />
     <Resource Include="Images\LotEditor\GroundTextures\9.png" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Bundled vgmstream audio decoder, copied next to SimCityPak.exe for the
+         `export-audio` CLI command. Source: https://github.com/vgmstream/vgmstream -->
+    <Content Include="Tools\vgmstream\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
     <PropertyGroup>

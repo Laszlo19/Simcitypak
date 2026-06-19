@@ -77,8 +77,13 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
 - **Wiring:** `App.xaml` had `StartupUri` removed; `App.xaml.cs` `OnStartup` now routes to
   `CliRunner` when `IsCliCommand(args)`, else creates `MainWindow` manually.
 - **Console:** `AttachConsole(ATTACH_PARENT_PROCESS)` so `Console.WriteLine` reaches the terminal.
-- **Implemented:** `export-obj <input> <outputDir>` — input = `.package` | folder | single `.rw4`.
-  Tested OK on extracted RW4 models (4/5 exported, 1 texture-only skipped).
+- **Implemented commands** (input = `.package` | folder | single file for both):
+  - `export-obj <input> <outputDir>` — RW4 models → Wavefront .obj. Tested 4/5 (1 texture-only skip).
+  - `export-audio <input> <outputDir>` — Wwise Vorbis (type id `0x0d9e5710`) → PCM .wav. Tested OK
+    (output verified `pcm_s16le`). Drives **bundled vgmstream** at `SimCityPak\Tools\vgmstream\`
+    (committed; copied next to the exe via a `<Content>` item with CopyToOutputDirectory). The
+    `convert_rw4.py`-era loose vgmstream in `simcity sounds\_tools\` still exists (kept per user;
+    delete only when told).
 
 **Export pipeline (reuse this for new formats):**
 ```

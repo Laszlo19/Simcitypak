@@ -16,20 +16,22 @@ The original GUI is unchanged in behaviour.
 Run the same `SimCityPak.exe` headlessly to mass-export assets — no GUI.
 
 ```
-SimCityPak.exe export-obj <input> <outputDir>
+SimCityPak.exe export-obj   <input> <outputDir>   # RW4 models -> Wavefront .obj
+SimCityPak.exe export-audio <input> <outputDir>   # Wwise Vorbis audio -> playable PCM .wav
+SimCityPak.exe help                               # usage
 ```
 
-`<input>` may be:
-- a **`.package`** file — exports every RW4 model inside it,
-- a **folder** — exports every `*.rw4` file in it,
-- a single **`.rw4`** file — exports just that model.
+For every command, `<input>` may be:
+- a **`.package`** file — exports every matching resource inside it,
+- a **folder** — exports every matching file (`*.rw4` / `*.wav`) in it,
+- a single **file** — exports just that one.
 
-Each model's mesh sections are written as `<name>[_meshN].obj` (Wavefront OBJ).
-Texture-only resources (no mesh) are reported as `SKIP`.
-
-```
-SimCityPak.exe help        # usage
-```
+- **`export-obj`** writes each model's mesh sections as `<name>[_meshN].obj`.
+  Texture-only resources (no mesh) are reported as `SKIP`.
+- **`export-audio`** decodes SimCity's Audiokinetic **Wwise Vorbis** audio (RIFF with
+  codec `0xFFFF`, which normal players reject) into standard PCM `.wav`. It uses
+  **[vgmstream](https://github.com/vgmstream/vgmstream)**, bundled in `Tools\vgmstream\`
+  next to the executable.
 
 > Roadmap (not yet implemented): `export-dae` (Collada), `export-png` (textures),
 > `export-prop` (property dumps). See `HANDOFF.md`.
