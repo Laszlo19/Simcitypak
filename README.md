@@ -44,9 +44,9 @@ normal GUI exactly as before.
 Requirements:
 - Windows, Visual Studio 2022+ (MSBuild "Current"), .NET Framework **4.8** dev pack
 - `nuget.exe` (for package restore)
-- The **Microsoft XNA Framework 4.0** assemblies in `References\Xna\x86\`
-  (`Microsoft.Xna.Framework.dll`, `Microsoft.Xna.Framework.Graphics.dll`) — see
-  `BUILD_NOTES.md` for how to obtain them; they are **not** committed to the repo.
+- The **Microsoft XNA Framework 4.0** assemblies (`Microsoft.Xna.Framework.dll`,
+  `Microsoft.Xna.Framework.Graphics.dll`) — **included** in `References\Xna\x86\`, so a fresh
+  clone builds without extra setup. (See `BUILD_NOTES.md` for their origin.)
 
 Then either run `rebuild.ps1`, or:
 

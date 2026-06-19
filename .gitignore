@@ -360,7 +360,3 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
-
-# XNA Framework 4.0 assemblies added locally to build (redistributable, not committed).
-# See BUILD_NOTES.md to re-fetch into References\Xna\x86\.
-References/Xna/

@@ -52,7 +52,8 @@ Upstream `main` (altinctrl/SimCityPak) did **not** build as-is. Fixes applied (f
 1. `nuget restore SimCityPak.sln` (EntityFramework + System.Data.SQLite).
 2. **XNA Framework 4.0** assemblies were missing. Extracted from the official
    `xnafx40_redist.msi` (via `msiexec /a`, no system install) into `References\Xna\x86\`.
-   These DLLs are **gitignored** — see BUILD_NOTES for re-fetch steps.
+   The two referenced DLLs (Framework + Graphics) are now **committed** to the repo, so a
+   fresh clone builds without extra setup.
 3. Retarget v4.0 → **v4.8** at build time (`/p:TargetFrameworkVersion=v4.8`,
    `/p:TargetFrameworkProfile=` to drop the dead Client Profile).
 4. Added a fallback `OutputPath` to `nQuant.Core.csproj` and `SimCityPak.Packages.csproj`
@@ -140,7 +141,8 @@ was deleted to save space; regenerate any time.)
 
 - Repo root: `C:\Projects\simcitypak\SimCityPak-main\SimCityPak-main\` (folder with `SimCityPak.sln`).
 - Scope: **app source only** (assets excluded — too large/binary). `.gitignore` covers bin/obj,
-  packages/, References\Xna\, *.user, test output.
+  packages/, *.user, test output. The two referenced XNA DLLs ARE committed (force-added past
+  the generic `x86/` ignore rule) so the repo builds from a clean clone.
 - Decision: **public** repo. User will create the empty GitHub repo and provide the URL; then
   add remote + push. (No `gh`; first push may trigger Git Credential Manager browser login.)
 - TODO when URL is known:
@@ -156,5 +158,4 @@ was deleted to save space; regenerate any time.)
       Optional; not needed for SimCityPak.
 - [ ] Delete the redundant `C:\Users\tamas\Desktop\simcity sounds` and the stray
       `simcity sounds\SimCityPak-main\` duplicate after a final check.
-- [ ] Consider committing the XNA DLLs via a separate setup script or documenting a one-liner
-      (currently gitignored; a fresh clone can't build without them).
+- [x] XNA DLLs committed — fresh clone builds without extra setup.
