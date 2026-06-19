@@ -21,7 +21,7 @@ C:\Projects\simcitypak\
     ├── models-dlc0\                  780 source .rw4 models (extracted from SimCity)
     ├── models-converted\            563 .glb models (converted via Blender, see §5)
     ├── dlc0\                         24 source audio .rw4
-    ├── _tools\                       vgmstream, nuget.exe, XNA extract, convert_rw4.py, build logs
+    ├── _tools\                       nuget.exe, XNA installer+extract, SporeModder addon + convert_rw4.py
     ├── SimCityPak-main\             (STRAY duplicate of the app — safe to delete)
     └── 91 × SCP_*.wav               original game audio (EA-codec; see §6)
 ```
@@ -82,8 +82,8 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
   - `export-audio <input> <outputDir>` — Wwise Vorbis (type id `0x0d9e5710`) → PCM .wav. Tested OK
     (output verified `pcm_s16le`). Drives **bundled vgmstream** at `SimCityPak\Tools\vgmstream\`
     (committed; copied next to the exe via a `<Content>` item with CopyToOutputDirectory). The
-    `convert_rw4.py`-era loose vgmstream in `simcity sounds\_tools\` still exists (kept per user;
-    delete only when told).
+    old loose vgmstream that lived in `simcity sounds\_tools\` has since been removed — the
+    app's bundled copy is now authoritative.
 
 **Export pipeline (reuse this for new formats):**
 ```
@@ -136,9 +136,10 @@ texture-only). Uses the **SporeModder Blender add-on**, patched for SimCity + Bl
 ## 6. Audio pipeline (already done, reproducible)
 
 The 91 `SCP_*.wav` are **Audiokinetic Wwise Vorbis** (codec 0xFFFF) — not real WAVs, so normal
-players reject them. Decoded with **vgmstream** (`_tools\vgmstream-cli.exe`) → standard PCM WAV.
-Re-run: `vgmstream-cli.exe -o out.wav in.wav`. (The bulk-converted `converted\` folder, ~4 GB,
-was deleted to save space; regenerate any time.)
+players reject them. Decoded with **vgmstream**, which is now **integrated into the app** — re-run
+via `SimCityPak.exe export-audio <input> <outputDir>` (see §4). The standalone vgmstream that used
+to sit in `_tools\` was removed in cleanup; the app's bundled `Tools\vgmstream\` copy is the one to
+use. (The bulk-converted `converted\` folder, ~4 GB, was deleted to save space; regenerate any time.)
 
 ---
 
