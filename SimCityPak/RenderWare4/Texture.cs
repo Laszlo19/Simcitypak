@@ -53,6 +53,48 @@ namespace SporeMaster.RenderWare4
         }
         public override int ComputeSize() { return 4 * 7 + 2 * 2; }
 
+        /// <summary>
+        /// Writes this texture out as a standard .dds file (DDS magic + header + the
+        /// raw block-compressed blob). Headless: builds the same header as ToImage()
+        /// but skips the GraphicsDevice decode, so it works from the CLI.
+        /// Only the compressed (DXT/FourCC) form is supported; textureType 21 is a
+        /// raw bitmap, not DDS.
+        /// </summary>
+        public void SaveDds(string path)
+        {
+            if (this.textureType == 21)
+                throw new NotSupportedException("Texture is a raw bitmap (textureType 21), not a DDS.");
+
+            using (var stream = File.Create(path))
+            {
+                stream.WriteU32(0x20534444);  // 'DDS '
+                stream.WriteU32(0x7C);  // header size
+                stream.WriteU32(0xA1007);  // flags
+                stream.WriteU32(height);
+                stream.WriteU32(width);
+                stream.WriteU32((uint)height * (uint)width);  // top mipmap size
+                stream.WriteU32(0);
+                stream.WriteU32(mipmapInfo / 0x100);
+                for (int i = 0; i < 11; i++)
+                    stream.WriteU32(0);
+
+                // pixel format
+                stream.WriteU32(32);
+                stream.WriteU32(4);  // DDPF_FOURCC
+                stream.WriteU32(textureType);
+                stream.WriteU32(32);
+                stream.WriteU32(0xff0000);
+                stream.WriteU32(0x00ff00);
+                stream.WriteU32(0x0000ff);
+                stream.WriteU32(0xff000000);
+                stream.WriteU32(0);
+                for (int i = 0; i < 4; i++)
+                    stream.WriteU32(0);
+
+                stream.Write(texData.blob, 0, texData.blob.Length);
+            }
+        }
+
         public WriteableBitmap ToImage(bool opaqueAlpha)
         {
             if (this.textureType != 21)

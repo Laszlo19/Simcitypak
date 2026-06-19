@@ -39,6 +39,7 @@ namespace SimCityPak.Cli
             {
                 case "export-obj":
                 case "export-gltf":
+                case "export-texture":
                 case "export-audio":
                 case "help":
                 case "--help":
@@ -66,6 +67,8 @@ namespace SimCityPak.Cli
                         return RunExportModels(args, ".obj", (m, p) => m.Export(p));
                     case "export-gltf":
                         return RunExportModels(args, ".glb", (m, p) => new GltfConverter().Export(m, p));
+                    case "export-texture":
+                        return RunExportTextures(args);
                     case "export-audio":
                         return RunExportAudio(args);
                     default:
@@ -85,18 +88,20 @@ namespace SimCityPak.Cli
             Console.WriteLine("SimCityPak CLI");
             Console.WriteLine();
             Console.WriteLine("Usage:");
-            Console.WriteLine("  SimCityPak.exe export-obj   <input> <outputDir>");
-            Console.WriteLine("  SimCityPak.exe export-gltf  <input> <outputDir>");
-            Console.WriteLine("  SimCityPak.exe export-audio <input> <outputDir>");
+            Console.WriteLine("  SimCityPak.exe export-obj     <input> <outputDir>");
+            Console.WriteLine("  SimCityPak.exe export-gltf    <input> <outputDir>");
+            Console.WriteLine("  SimCityPak.exe export-texture <input> <outputDir>");
+            Console.WriteLine("  SimCityPak.exe export-audio   <input> <outputDir>");
             Console.WriteLine();
             Console.WriteLine("  <input> may be:");
             Console.WriteLine("    - a .package file  -> exports every matching resource inside it");
             Console.WriteLine("    - a folder         -> exports every matching file in it");
             Console.WriteLine("    - a single file    -> exports just that one");
             Console.WriteLine();
-            Console.WriteLine("  export-obj   : RW4 models -> Wavefront .obj  (<name>[_meshN].obj)");
-            Console.WriteLine("  export-gltf  : RW4 models -> binary glTF .glb (<name>[_meshN].glb)");
-            Console.WriteLine("  export-audio : Wwise Vorbis audio -> playable PCM .wav (via bundled vgmstream)");
+            Console.WriteLine("  export-obj     : RW4 models   -> Wavefront .obj  (<name>[_meshN].obj)");
+            Console.WriteLine("  export-gltf    : RW4 models   -> binary glTF .glb (<name>[_meshN].glb)");
+            Console.WriteLine("  export-texture : RW4 textures -> .dds images     (<name>[_texN].dds)");
+            Console.WriteLine("  export-audio   : Wwise Vorbis audio -> PCM .wav (via bundled vgmstream)");
             Console.WriteLine();
             Console.WriteLine("Examples:");
             Console.WriteLine("  SimCityPak.exe export-gltf  SimCity.package C:\\out");
@@ -200,6 +205,96 @@ namespace SimCityPak.Cli
                 exporter(mesh, outPath);
                 written++;
                 Console.WriteLine("OK   " + Path.GetFileName(outPath));
+            }
+            return written;
+        }
+
+        // ----- export-texture -----------------------------------------------
+
+        private static int RunExportTextures(string[] args)
+        {
+            if (args.Length < 3)
+            {
+                Console.WriteLine("Usage: SimCityPak.exe export-texture <input> <outputDir>");
+                return 2;
+            }
+            string input = args[1];
+            string outDir = args[2];
+            Directory.CreateDirectory(outDir);
+
+            int res = 0, textures = 0, fails = 0;
+
+            Action<byte[], string> handle = (data, baseName) =>
+            {
+                try
+                {
+                    int t = ExportRw4Textures(data, outDir, baseName);
+                    if (t > 0) { res++; textures += t; }
+                    else Console.WriteLine("SKIP " + baseName + " (no texture)");
+                }
+                catch (Exception ex) { fails++; Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
+            };
+
+            if (Directory.Exists(input))
+            {
+                foreach (string file in Directory.GetFiles(input, "*.rw4"))
+                    handle(File.ReadAllBytes(file), Path.GetFileNameWithoutExtension(file));
+            }
+            else if (input.EndsWith(".package", StringComparison.OrdinalIgnoreCase))
+            {
+                DatabasePackedFile package = DatabasePackedFile.LoadFromFile(input);
+                foreach (DatabaseIndex index in package.Indices)
+                {
+                    if (index.TypeId != RW4_MODEL_TYPE_ID) continue;
+                    string baseName = string.Format("{0:x8}-{1:x8}-{2:x8}",
+                        index.TypeId, index.GroupContainer, index.InstanceId);
+                    handle(index.GetIndexData(true), baseName);
+                }
+            }
+            else if (File.Exists(input))
+            {
+                handle(File.ReadAllBytes(input), Path.GetFileNameWithoutExtension(input));
+            }
+            else
+            {
+                Console.WriteLine("ERROR: input not found: " + input);
+                return 2;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine(string.Format("Done. resources={0} textures(dds)={1} failed={2}", res, textures, fails));
+            Console.WriteLine("Output: " + Path.GetFullPath(outDir));
+            return fails > 0 ? 1 : 0;
+        }
+
+        /// <summary>Parses RW4 bytes and writes each Texture section as a .dds.</summary>
+        private static int ExportRw4Textures(byte[] data, string outDir, string baseName)
+        {
+            RW4Model model = new RW4Model();
+            using (var ms = new MemoryStream(data))
+                model.Read(ms);
+
+            var texSections = model.Sections
+                .Where(s => s.TypeCode == SectionTypeCodes.Texture && s.obj is Texture)
+                .ToList();
+
+            int written = 0;
+            for (int i = 0; i < texSections.Count; i++)
+            {
+                Texture tex = (Texture)texSections[i].obj;
+                string suffix = texSections.Count > 1 ? ("_tex" + i) : "";
+                string outPath = Path.Combine(outDir, baseName + suffix + ".dds");
+                try
+                {
+                    tex.SaveDds(outPath);
+                    written++;
+                    Console.WriteLine("OK   " + Path.GetFileName(outPath));
+                }
+                catch (NotSupportedException)
+                {
+                    // e.g. raw-bitmap (textureType 21) textures: skip, don't fail the model.
+                    Console.WriteLine("SKIP " + baseName + suffix + " (unsupported texture format)");
+                }
             }
             return written;
         }

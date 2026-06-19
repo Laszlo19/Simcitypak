@@ -16,10 +16,11 @@ The original GUI is unchanged in behaviour.
 Run the same `SimCityPak.exe` headlessly to mass-export assets — no GUI.
 
 ```
-SimCityPak.exe export-obj   <input> <outputDir>   # RW4 models -> Wavefront .obj
-SimCityPak.exe export-gltf  <input> <outputDir>   # RW4 models -> binary glTF 2.0 (.glb)
-SimCityPak.exe export-audio <input> <outputDir>   # Wwise Vorbis audio -> playable PCM .wav
-SimCityPak.exe help                               # usage
+SimCityPak.exe export-obj     <input> <outputDir>  # RW4 models   -> Wavefront .obj
+SimCityPak.exe export-gltf    <input> <outputDir>  # RW4 models   -> binary glTF 2.0 (.glb)
+SimCityPak.exe export-texture <input> <outputDir>  # RW4 textures -> .dds images
+SimCityPak.exe export-audio   <input> <outputDir>  # Wwise Vorbis audio -> playable PCM .wav
+SimCityPak.exe help                                # usage
 ```
 
 For every command, `<input>` may be:
@@ -33,13 +34,18 @@ For every command, `<input>` may be:
   (positions + normals + texture coordinates + indices) — the in-app equivalent of the
   geometry side of the SporeModder Blender add-on. Opens in Blender, Windows 3D Viewer,
   three.js, Unity, Unreal, etc. (Materials/textures/skeleton/animation are not written yet.)
+- **`export-texture`** writes each model's embedded textures as `.dds` images
+  (`<name>[_texN].dds`). Block-compressed (DXT1/DXT5) textures are supported; raw-bitmap
+  textures (`textureType 21`) are skipped. Open in any DDS viewer, or convert with
+  `ffmpeg -i tex.dds tex.png`.
 - **`export-audio`** decodes SimCity's Audiokinetic **Wwise Vorbis** audio (RIFF with
   codec `0xFFFF`, which normal players reject) into standard PCM `.wav`. It uses
   **[vgmstream](https://github.com/vgmstream/vgmstream)**, bundled in `Tools\vgmstream\`
   next to the executable.
 
-> Roadmap (not yet implemented): `export-dae` (Collada), embedded textures → `.dds`/`.png`,
-> glTF materials/skeleton/animation, `export-prop` (property dumps). See `HANDOFF.md`.
+> Roadmap (not yet implemented): `export-dae` (Collada), direct `.png` texture output,
+> raw-bitmap (type 21) textures, glTF materials/skeleton/animation, `export-prop`
+> (property dumps). See `HANDOFF.md`.
 
 Running `SimCityPak.exe` with **no arguments** (or any non-CLI argument) launches the
 normal GUI exactly as before.

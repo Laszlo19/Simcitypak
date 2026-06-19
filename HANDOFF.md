@@ -84,6 +84,12 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     Newtonsoft.Json for the JSON chunk). Validated: counts match OBJ and it imports cleanly in
     Blender 4.3. The two model commands share `RunExportModels(args, ext, exporter)` in CliRunner.
     NOT yet written to the .glb: materials, embedded textures, skeleton, animation.
+  - `export-texture <input> <outputDir>` — RW4 Texture sections (type 0x20003) → .dds files.
+    Added `Texture.SaveDds(path)` in `RenderWare4\Texture.cs` — writes the DDS magic+header
+    (same header ToImage() builds) + the raw block-compressed blob, WITHOUT the GraphicsDevice
+    decode, so it's headless. Tested: DXT1/DXT5 .dds, ffmpeg decodes to valid RGBA PNG.
+    Raw-bitmap textures (textureType 21) are skipped (NotSupportedException → SKIP), not failed.
+    TODO: support type 21, and an optional direct-to-PNG mode.
   - `export-audio <input> <outputDir>` — Wwise Vorbis (type id `0x0d9e5710`) → PCM .wav. Tested OK
     (output verified `pcm_s16le`). Drives **bundled vgmstream** at `SimCityPak\Tools\vgmstream\`
     (committed; copied next to the exe via a `<Content>` item with CopyToOutputDirectory). The
