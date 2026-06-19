@@ -38,6 +38,7 @@ namespace SimCityPak.Cli
             switch (args[0].ToLowerInvariant())
             {
                 case "export-obj":
+                case "export-gltf":
                 case "export-audio":
                 case "help":
                 case "--help":
@@ -62,7 +63,9 @@ namespace SimCityPak.Cli
                 switch (args[0].ToLowerInvariant())
                 {
                     case "export-obj":
-                        return RunExportObj(args);
+                        return RunExportModels(args, ".obj", (m, p) => m.Export(p));
+                    case "export-gltf":
+                        return RunExportModels(args, ".glb", (m, p) => new GltfConverter().Export(m, p));
                     case "export-audio":
                         return RunExportAudio(args);
                     default:
@@ -83,6 +86,7 @@ namespace SimCityPak.Cli
             Console.WriteLine();
             Console.WriteLine("Usage:");
             Console.WriteLine("  SimCityPak.exe export-obj   <input> <outputDir>");
+            Console.WriteLine("  SimCityPak.exe export-gltf  <input> <outputDir>");
             Console.WriteLine("  SimCityPak.exe export-audio <input> <outputDir>");
             Console.WriteLine();
             Console.WriteLine("  <input> may be:");
@@ -91,19 +95,25 @@ namespace SimCityPak.Cli
             Console.WriteLine("    - a single file    -> exports just that one");
             Console.WriteLine();
             Console.WriteLine("  export-obj   : RW4 models -> Wavefront .obj  (<name>[_meshN].obj)");
+            Console.WriteLine("  export-gltf  : RW4 models -> binary glTF .glb (<name>[_meshN].glb)");
             Console.WriteLine("  export-audio : Wwise Vorbis audio -> playable PCM .wav (via bundled vgmstream)");
             Console.WriteLine();
             Console.WriteLine("Examples:");
-            Console.WriteLine("  SimCityPak.exe export-obj   SimCity.package C:\\out");
+            Console.WriteLine("  SimCityPak.exe export-gltf  SimCity.package C:\\out");
             Console.WriteLine("  SimCityPak.exe export-obj   C:\\models-dlc0 C:\\out");
             Console.WriteLine("  SimCityPak.exe export-audio C:\\game-audio  C:\\out");
         }
 
-        private static int RunExportObj(string[] args)
+        /// <summary>
+        /// Shared driver for the RW4-model export commands. <paramref name="ext"/> is the
+        /// output extension (e.g. ".obj" / ".glb"); <paramref name="exporter"/> writes one
+        /// mesh to one file.
+        /// </summary>
+        private static int RunExportModels(string[] args, string ext, Action<RW4Mesh, string> exporter)
         {
             if (args.Length < 3)
             {
-                Console.WriteLine("Usage: SimCityPak.exe export-obj <input> <outputDir>");
+                Console.WriteLine("Usage: SimCityPak.exe " + args[0] + " <input> <outputDir>");
                 return 2;
             }
             string input = args[1];
@@ -119,7 +129,7 @@ namespace SimCityPak.Cli
                     string baseName = Path.GetFileNameWithoutExtension(file);
                     try
                     {
-                        int m = ExportRw4Bytes(File.ReadAllBytes(file), outDir, baseName);
+                        int m = ExportRw4Bytes(File.ReadAllBytes(file), outDir, baseName, ext, exporter);
                         if (m > 0) { models++; meshes += m; }
                         else Console.WriteLine("SKIP " + baseName + " (no mesh)");
                     }
@@ -136,7 +146,7 @@ namespace SimCityPak.Cli
                         index.TypeId, index.GroupContainer, index.InstanceId);
                     try
                     {
-                        int m = ExportRw4Bytes(index.GetIndexData(true), outDir, baseName);
+                        int m = ExportRw4Bytes(index.GetIndexData(true), outDir, baseName, ext, exporter);
                         if (m > 0) { models++; meshes += m; }
                         else Console.WriteLine("SKIP " + baseName + " (no mesh)");
                     }
@@ -148,7 +158,7 @@ namespace SimCityPak.Cli
                 string baseName = Path.GetFileNameWithoutExtension(input);
                 try
                 {
-                    int m = ExportRw4Bytes(File.ReadAllBytes(input), outDir, baseName);
+                    int m = ExportRw4Bytes(File.ReadAllBytes(input), outDir, baseName, ext, exporter);
                     if (m > 0) { models++; meshes += m; }
                     else Console.WriteLine("SKIP " + baseName + " (no mesh)");
                 }
@@ -161,16 +171,17 @@ namespace SimCityPak.Cli
             }
 
             Console.WriteLine();
-            Console.WriteLine(string.Format("Done. models={0} meshes(obj)={1} failed={2}", models, meshes, fails));
+            Console.WriteLine(string.Format("Done. models={0} meshes={1} failed={2}", models, meshes, fails));
             Console.WriteLine("Output: " + Path.GetFullPath(outDir));
             return fails > 0 ? 1 : 0;
         }
 
         /// <summary>
-        /// Parses RW4 bytes and writes each Mesh section as an .obj.
-        /// Returns the number of .obj files written.
+        /// Parses RW4 bytes and writes each Mesh section via <paramref name="exporter"/>.
+        /// Returns the number of files written.
         /// </summary>
-        private static int ExportRw4Bytes(byte[] data, string outDir, string baseName)
+        private static int ExportRw4Bytes(byte[] data, string outDir, string baseName,
+            string ext, Action<RW4Mesh, string> exporter)
         {
             RW4Model model = new RW4Model();
             using (var ms = new MemoryStream(data))
@@ -185,8 +196,8 @@ namespace SimCityPak.Cli
             {
                 RW4Mesh mesh = (RW4Mesh)meshSections[i].obj;
                 string suffix = meshSections.Count > 1 ? ("_mesh" + i) : "";
-                string outPath = Path.Combine(outDir, baseName + suffix + ".obj");
-                mesh.Export(outPath);
+                string outPath = Path.Combine(outDir, baseName + suffix + ext);
+                exporter(mesh, outPath);
                 written++;
                 Console.WriteLine("OK   " + Path.GetFileName(outPath));
             }

@@ -168,6 +168,7 @@
     </Compile>
     <Compile Include="RenderWare4\Exporters\ColladaConverter.cs" />
     <Compile Include="RenderWare4\Exporters\collada_schema_1_4.cs" />
+    <Compile Include="RenderWare4\Exporters\GltfConverter.cs" />
     <Compile Include="RenderWare4\Exporters\AdvancedColladaConverter.cs" />
     <Compile Include="RenderWare4\Exporters\IConverter.cs" />
     <Compile Include="RenderWare4\Textures\DXT8Image.cs" />

@@ -17,6 +17,7 @@ Run the same `SimCityPak.exe` headlessly to mass-export assets — no GUI.
 
 ```
 SimCityPak.exe export-obj   <input> <outputDir>   # RW4 models -> Wavefront .obj
+SimCityPak.exe export-gltf  <input> <outputDir>   # RW4 models -> binary glTF 2.0 (.glb)
 SimCityPak.exe export-audio <input> <outputDir>   # Wwise Vorbis audio -> playable PCM .wav
 SimCityPak.exe help                               # usage
 ```
@@ -28,13 +29,17 @@ For every command, `<input>` may be:
 
 - **`export-obj`** writes each model's mesh sections as `<name>[_meshN].obj`.
   Texture-only resources (no mesh) are reported as `SKIP`.
+- **`export-gltf`** writes each model as a self-contained binary **glTF 2.0** `.glb`
+  (positions + normals + texture coordinates + indices) — the in-app equivalent of the
+  geometry side of the SporeModder Blender add-on. Opens in Blender, Windows 3D Viewer,
+  three.js, Unity, Unreal, etc. (Materials/textures/skeleton/animation are not written yet.)
 - **`export-audio`** decodes SimCity's Audiokinetic **Wwise Vorbis** audio (RIFF with
   codec `0xFFFF`, which normal players reject) into standard PCM `.wav`. It uses
   **[vgmstream](https://github.com/vgmstream/vgmstream)**, bundled in `Tools\vgmstream\`
   next to the executable.
 
-> Roadmap (not yet implemented): `export-dae` (Collada), `export-png` (textures),
-> `export-prop` (property dumps). See `HANDOFF.md`.
+> Roadmap (not yet implemented): `export-dae` (Collada), embedded textures → `.dds`/`.png`,
+> glTF materials/skeleton/animation, `export-prop` (property dumps). See `HANDOFF.md`.
 
 Running `SimCityPak.exe` with **no arguments** (or any non-CLI argument) launches the
 normal GUI exactly as before.

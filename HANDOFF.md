@@ -77,8 +77,13 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
 - **Wiring:** `App.xaml` had `StartupUri` removed; `App.xaml.cs` `OnStartup` now routes to
   `CliRunner` when `IsCliCommand(args)`, else creates `MainWindow` manually.
 - **Console:** `AttachConsole(ATTACH_PARENT_PROCESS)` so `Console.WriteLine` reaches the terminal.
-- **Implemented commands** (input = `.package` | folder | single file for both):
+- **Implemented commands** (input = `.package` | folder | single file for all):
   - `export-obj <input> <outputDir>` — RW4 models → Wavefront .obj. Tested 4/5 (1 texture-only skip).
+  - `export-gltf <input> <outputDir>` — RW4 models → binary glTF 2.0 .glb (geometry: positions,
+    normals, UVs, indices). Pure-C# GLB writer in `RenderWare4\Exporters\GltfConverter.cs` (uses
+    Newtonsoft.Json for the JSON chunk). Validated: counts match OBJ and it imports cleanly in
+    Blender 4.3. The two model commands share `RunExportModels(args, ext, exporter)` in CliRunner.
+    NOT yet written to the .glb: materials, embedded textures, skeleton, animation.
   - `export-audio <input> <outputDir>` — Wwise Vorbis (type id `0x0d9e5710`) → PCM .wav. Tested OK
     (output verified `pcm_s16le`). Drives **bundled vgmstream** at `SimCityPak\Tools\vgmstream\`
     (committed; copied next to the exe via a `<Content>` item with CopyToOutputDirectory). The
