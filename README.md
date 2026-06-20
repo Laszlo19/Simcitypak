@@ -31,9 +31,11 @@ For every command, `<input>` may be:
 - **`export-obj`** writes each model's mesh sections as `<name>[_meshN].obj`.
   Texture-only resources (no mesh) are reported as `SKIP`.
 - **`export-gltf`** writes each model as a self-contained binary **glTF 2.0** `.glb`
-  (positions + normals + texture coordinates + indices) — the in-app equivalent of the
-  geometry side of the SporeModder Blender add-on. Opens in Blender, Windows 3D Viewer,
-  three.js, Unity, Unreal, etc. (Materials/textures/skeleton/animation are not written yet.)
+  (positions + normals + texture coordinates + indices) **with the model's primary embedded
+  texture** baked in: the DXT1/DXT5 texture is decoded to PNG and applied as the material's
+  base color, so models show textured in Blender, Windows 3D Viewer, three.js, Unity, Unreal,
+  etc. (Models whose texture is a raw bitmap (type 21) export untextured. Normal/spec maps,
+  per-mesh materials, skeleton and animation are not written yet.)
 - **`export-texture`** writes each model's embedded textures as `.dds` images
   (`<name>[_texN].dds`). Block-compressed (DXT1/DXT5) textures are supported; raw-bitmap
   textures (`textureType 21`) are skipped. Open in any DDS viewer, or convert with
