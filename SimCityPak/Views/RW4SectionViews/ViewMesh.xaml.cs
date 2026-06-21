@@ -284,6 +284,7 @@ namespace SimCityPak
             SaveFileDialog dlg = new SaveFileDialog();
             dlg.DefaultExt = ".obj";
             dlg.Filter = "WaveFront .OBJ|*.obj";
+            dlg.FileName = MainWindow.SelectedExportName;   // localized name of the selected resource
             if (dlg.ShowDialog().GetValueOrDefault(false))
             {
                 if (this.DataContext != null && this.DataContext.GetType() == typeof(RW4ModelSectionView))

@@ -265,6 +265,7 @@ namespace SimCityPak
 
                     SaveFileDialog dlg = new SaveFileDialog();
                     dlg.Filter = "DirectDraw Surface .DDS|*.dds";
+                    dlg.FileName = MainWindow.SelectedExportName;   // localized name of the selected resource
                     if (dlg.ShowDialog().GetValueOrDefault(false))
                     {
                         using (Stream stream = File.Create(dlg.FileName))
@@ -319,6 +320,7 @@ namespace SimCityPak
 
                     SaveFileDialog dlg = new SaveFileDialog();
                     dlg.Filter = "BMP|*.bmp";
+                    dlg.FileName = MainWindow.SelectedExportName;   // localized name of the selected resource
                     if (dlg.ShowDialog().GetValueOrDefault(false))
                     {
                         {
@@ -414,6 +416,7 @@ namespace SimCityPak
 
                     SaveFileDialog dlg = new SaveFileDialog();
                     dlg.Filter = "DirectDraw Surface .DDS|*.dds";
+                    dlg.FileName = MainWindow.SelectedExportName;   // localized name of the selected resource
                     if (dlg.ShowDialog().GetValueOrDefault(false))
                     {
                         using (Stream stream = File.Create(dlg.FileName))

@@ -61,6 +61,12 @@ namespace SimCityPak
             mnuSearchPROP.IsEnabled = true;
         }
 
+        /// <summary>
+        /// Localized base file name (no extension) of the currently selected resource.
+        /// Used as the default file name by the OBJ/DDS/PNG export dialogs in the sub-views.
+        /// </summary>
+        public static string SelectedExportName = "";
+
         private void dataGridInstances_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (e.AddedItems.Count == 1)
@@ -68,6 +74,7 @@ namespace SimCityPak
                 if (e.AddedItems[0].GetType() == typeof(DatabaseIndex))
                 {
                     DatabaseIndex index = (DatabaseIndex)e.AddedItems[0];
+                    SelectedExportName = Path.GetFileNameWithoutExtension(index.GetExportFileName());
                     byte[] data;
                     if (index.IsModified)
                     {
@@ -648,46 +655,26 @@ namespace SimCityPak
 
                                 if (!itemNames.ContainsKey(index.InstanceId))
                                 {
-
-                                    if (propertyFile.Values.ContainsKey(0x09FB78CB))
+                                    // Property hashes that hold a resource's display name.
+                                    uint[] nameHashes = { 0x09FB78CB, 0x0A09F5FA, 0x09B711C3, 0x0E28B5BC, 0x0E28B5D5 };
+                                    string name = null;
+                                    foreach (uint h in nameHashes)
                                     {
-                                        ArrayProperty arrprop = propertyFile.Values[0x09FB78CB] as ArrayProperty;
+                                        if (!propertyFile.Values.ContainsKey(h)) continue;
+                                        ArrayProperty arrprop = propertyFile.Values[h] as ArrayProperty;
+                                        if (arrprop == null || arrprop.Values.Count == 0) continue;
                                         TextProperty prop = arrprop.Values[0] as TextProperty;
-                                        string name = LocaleRegistry.Instance.GetLocalizedString(prop.TableId, prop.InstanceId);
-
-                                        itemNames.Add(index.InstanceId, name.Replace("'", "''"));
+                                        if (prop == null) continue;
+                                        string s = LocaleRegistry.Instance.GetLocalizedString(prop.TableId, prop.InstanceId);
+                                        if (!string.IsNullOrEmpty(s)) { name = s.Replace("'", "''"); break; }
                                     }
-                                    else if (propertyFile.Values.ContainsKey(0x0A09F5FA))
+                                    if (name != null)
                                     {
-                                        ArrayProperty arrprop = propertyFile.Values[0x0A09F5FA] as ArrayProperty;
-                                        TextProperty prop = arrprop.Values[0] as TextProperty;
-                                        string name = LocaleRegistry.Instance.GetLocalizedString(prop.TableId, prop.InstanceId);
-
-                                        itemNames.Add(index.InstanceId, name.Replace("'", "''"));
-                                    }
-                                    else if (propertyFile.Values.ContainsKey(0x09B711C3))
-                                    {
-                                        ArrayProperty arrprop = propertyFile.Values[0x09B711C3] as ArrayProperty;
-                                        TextProperty prop = arrprop.Values[0] as TextProperty;
-                                        string name = LocaleRegistry.Instance.GetLocalizedString(prop.TableId, prop.InstanceId);
-
-                                        itemNames.Add(index.InstanceId, name.Replace("'", "''"));
-                                    }
-                                    else if (propertyFile.Values.ContainsKey(0x0E28B5BC))
-                                    {
-                                        ArrayProperty arrprop = propertyFile.Values[0x0E28B5BC] as ArrayProperty;
-                                        TextProperty prop = arrprop.Values[0] as TextProperty;
-                                        string name = LocaleRegistry.Instance.GetLocalizedString(prop.TableId, prop.InstanceId);
-
-                                        itemNames.Add(index.InstanceId, name.Replace("'", "''"));
-                                    }
-                                    else if (propertyFile.Values.ContainsKey(0x0E28B5D5))
-                                    {
-                                        ArrayProperty arrprop = propertyFile.Values[0x0E28B5D5] as ArrayProperty;
-                                        TextProperty prop = arrprop.Values[0] as TextProperty;
-                                        string name = LocaleRegistry.Instance.GetLocalizedString(prop.TableId, prop.InstanceId);
-
-                                        itemNames.Add(index.InstanceId, name.Replace("'", "''"));
+                                        itemNames[index.InstanceId] = name;
+                                        // Also name the models this prop references, so model/texture
+                                        // exports get the building's localized name (not just props).
+                                        foreach (KeyValuePair<uint, Property> kv in propertyFile.Values)
+                                            CollectModelNames(kv.Value, name, itemNames);
                                     }
                                 }
                             }
@@ -710,6 +697,24 @@ namespace SimCityPak
             {
                 System.Windows.MessageBox.Show("The Locale File is not specified in the application settings!", "Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
+        }
+
+        /// <summary>
+        /// Recursively maps every model (type 0x2f4e681b) referenced by a property to the
+        /// given building name, so model/texture exports inherit the building's localized name.
+        /// </summary>
+        private static void CollectModelNames(Property p, string name, Dictionary<uint, string> dict)
+        {
+            KeyProperty kp = p as KeyProperty;
+            if (kp != null)
+            {
+                if (kp.TypeId == 0x2f4e681b && !dict.ContainsKey(kp.InstanceId))
+                    dict[kp.InstanceId] = name;
+                return;
+            }
+            ArrayProperty arr = p as ArrayProperty;
+            if (arr != null)
+                foreach (Property sub in arr.Values) CollectModelNames(sub, name, dict);
         }
 
         private void mnuDeployScripts_Click(object sender, RoutedEventArgs e)
