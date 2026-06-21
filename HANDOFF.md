@@ -117,6 +117,20 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     Polish TODO: `DisplayValue` uses CurrentCulture so decimals are locale-formatted (commas on
     a HU machine), which makes Transform/array values ambiguous; an invariant-culture dump mode
     would be cleaner. FNV key hashes are printed as hex (no name lookup yet).
+
+- **Localized export names (done):** for `.package` input, `export-obj/gltf/texture/prop` name
+  files by **localized asset name** instead of TGI hashes. Add `--locale <Locale\xx-xx\Data.package>`
+  or set it in the GUI Settings (`Properties.Settings.Default.LocaleFile`). Implementation in
+  CliRunner: `BuildLocaleNameMap` loads the locale via `SimCityPak.LocaleRegistry.Create()` (reads
+  `Settings.LocaleFile`), scans every prop file for a name property (hashes 0x09FB78CB / 0x0A09F5FA
+  / 0x09B711C3 / 0x0E28B5BC / 0x0E28B5D5 → ArrayProperty[0] TextProperty → `GetLocalizedString`),
+  and maps that name to the prop's own instance AND to every model (type 0x2f4e681b) it references
+  via Key properties. `ResolveBaseName` sanitizes + de-duplicates (appends instance id on clash).
+  Validated on `SimCity_DLC0.package` + `Locale\en-us\Data.package`: 507 names, models/props out as
+  "Maxis Manor", "Baccarat Room", "Airship Hangar", etc. Locale at
+  `C:\Games\SimCity\SimCityData\Locale\en-us\Data.package`. Loose-file / folder input has no name
+  source, so it keeps hashes. NOTE: the GUI's single-export menus still use the old names — only the
+  CLI exports are localized so far.
   - `export-audio <input> <outputDir>` — Wwise Vorbis (type id `0x0d9e5710`) → PCM .wav. Tested OK
     (output verified `pcm_s16le`). Drives **bundled vgmstream** at `SimCityPak\Tools\vgmstream\`
     (committed; copied next to the exe via a `<Content>` item with CopyToOutputDirectory). The

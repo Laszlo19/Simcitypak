@@ -114,6 +114,10 @@ namespace SimCityPak.Cli
             Console.WriteLine("  export-prop    : .prop property lists -> readable .txt dump");
             Console.WriteLine("  export-audio   : Wwise Vorbis audio -> PCM .wav (via bundled vgmstream)");
             Console.WriteLine();
+            Console.WriteLine("  When exporting from a .package, add  --locale <Locale\\xx-xx\\Data.package>");
+            Console.WriteLine("  (or set it in the GUI Settings) to name files by their localized asset");
+            Console.WriteLine("  names instead of hashes. Falls back to hashes when no name is found.");
+            Console.WriteLine();
             Console.WriteLine("Examples:");
             Console.WriteLine("  SimCityPak.exe export-gltf  SimCity.package C:\\out");
             Console.WriteLine("  SimCityPak.exe export-obj   C:\\models-dlc0 C:\\out");
@@ -155,11 +159,15 @@ namespace SimCityPak.Cli
             else if (input.EndsWith(".package", StringComparison.OrdinalIgnoreCase))
             {
                 DatabasePackedFile package = DatabasePackedFile.LoadFromFile(input);
+                var nameMap = BuildLocaleNameMap(package, GetLocaleFile(args));
+                if (nameMap.Count > 0) Console.WriteLine("(using " + nameMap.Count + " localized names from the locale file)");
+                var used = new HashSet<string>();
                 foreach (DatabaseIndex index in package.Indices)
                 {
                     if (index.TypeId != RW4_MODEL_TYPE_ID) continue;
-                    string baseName = string.Format("{0:x8}-{1:x8}-{2:x8}",
+                    string fallback = string.Format("{0:x8}-{1:x8}-{2:x8}",
                         index.TypeId, index.GroupContainer, index.InstanceId);
+                    string baseName = ResolveBaseName(index.InstanceId, fallback, nameMap, used);
                     try
                     {
                         int m = ExportRw4Bytes(index.GetIndexData(true), outDir, baseName, ext, exporter);
@@ -220,6 +228,115 @@ namespace SimCityPak.Cli
             return written;
         }
 
+        // ----- localized names ----------------------------------------------
+
+        // Prop hashes that hold a resource's display-name (an ArrayProperty whose
+        // first element is a TextProperty -> locale table/id). From the GUI's
+        // MainWindow.mnuInstanceIds_Click.
+        private static readonly uint[] NameHashes =
+            { 0x09FB78CB, 0x0A09F5FA, 0x09B711C3, 0x0E28B5BC, 0x0E28B5D5 };
+
+        /// <summary>Locale package path: --locale &lt;path&gt; if given, else the
+        /// configured Settings.LocaleFile, else null.</summary>
+        private static string GetLocaleFile(string[] args)
+        {
+            for (int i = 0; i < args.Length - 1; i++)
+                if (args[i].Equals("--locale", StringComparison.OrdinalIgnoreCase))
+                    return args[i + 1];
+            try
+            {
+                string s = Properties.Settings.Default.LocaleFile;
+                if (!string.IsNullOrEmpty(s) && File.Exists(s)) return s;
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>
+        /// Builds instanceId -> localized display-name by scanning the package's prop
+        /// files: each prop's name property resolves to a locale string, which is mapped
+        /// to the prop's own instance and to every model (type 0x2f4e681b) it references
+        /// via Key properties. Empty map if no locale / no names. Never throws.
+        /// </summary>
+        private static Dictionary<uint, string> BuildLocaleNameMap(DatabasePackedFile package, string localeFile)
+        {
+            var map = new Dictionary<uint, string>();
+            if (string.IsNullOrEmpty(localeFile) || !File.Exists(localeFile)) return map;
+            LocaleRegistry locale;
+            try
+            {
+                Properties.Settings.Default.LocaleFile = localeFile;   // in-memory only (no Save)
+                locale = LocaleRegistry.Create();
+            }
+            catch { return map; }
+
+            foreach (DatabaseIndex index in package.Indices)
+            {
+                if (index.TypeId != PROP_TYPE_ID) continue;
+                PropertyFile pf;
+                try { pf = new PropertyFile(index); }
+                catch { continue; }
+
+                string name = null;
+                foreach (uint h in NameHashes)
+                {
+                    Property prop;
+                    if (!pf.Values.TryGetValue(h, out prop)) continue;
+                    ArrayProperty arr = prop as ArrayProperty;
+                    if (arr == null || arr.Values.Count == 0) continue;
+                    TextProperty tp = arr.Values[0] as TextProperty;
+                    if (tp == null) continue;
+                    string s = locale.GetLocalizedString(tp.TableId, tp.InstanceId);
+                    if (!string.IsNullOrEmpty(s)) { name = s; break; }
+                }
+                if (string.IsNullOrEmpty(name)) continue;
+
+                if (!map.ContainsKey(index.InstanceId)) map[index.InstanceId] = name;
+                foreach (var kv in pf.Values) CollectKeyRefs(kv.Value, name, map);
+            }
+            return map;
+        }
+
+        private static void CollectKeyRefs(Property p, string name, Dictionary<uint, string> map)
+        {
+            KeyProperty kp = p as KeyProperty;
+            if (kp != null)
+            {
+                if (kp.TypeId == RW4_MODEL_TYPE_ID && !map.ContainsKey(kp.InstanceId))
+                    map[kp.InstanceId] = name;
+                return;
+            }
+            ArrayProperty arr = p as ArrayProperty;
+            if (arr != null)
+                foreach (Property sub in arr.Values) CollectKeyRefs(sub, name, map);
+        }
+
+        private static string Sanitize(string name)
+        {
+            foreach (char c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
+            name = name.Trim();
+            return string.IsNullOrEmpty(name) ? "unnamed" : name;
+        }
+
+        /// <summary>Localized base file name for a resource, unique within this run.</summary>
+        private static string ResolveBaseName(uint instanceId, string fallback,
+            Dictionary<uint, string> nameMap, HashSet<string> used)
+        {
+            string baseName = fallback;
+            string nm;
+            if (nameMap != null && nameMap.TryGetValue(instanceId, out nm))
+                baseName = Sanitize(nm);
+
+            string candidate = baseName;
+            if (used.Contains(candidate.ToLowerInvariant()))
+                candidate = baseName + "_" + instanceId.ToString("x8");
+            int n = 2;
+            while (used.Contains(candidate.ToLowerInvariant()))
+                candidate = baseName + "_" + instanceId.ToString("x8") + "_" + (n++);
+            used.Add(candidate.ToLowerInvariant());
+            return candidate;
+        }
+
         // ----- export-texture -----------------------------------------------
 
         private static int RunExportTextures(string[] args)
@@ -254,12 +371,15 @@ namespace SimCityPak.Cli
             else if (input.EndsWith(".package", StringComparison.OrdinalIgnoreCase))
             {
                 DatabasePackedFile package = DatabasePackedFile.LoadFromFile(input);
+                var nameMap = BuildLocaleNameMap(package, GetLocaleFile(args));
+                if (nameMap.Count > 0) Console.WriteLine("(using " + nameMap.Count + " localized names from the locale file)");
+                var used = new HashSet<string>();
                 foreach (DatabaseIndex index in package.Indices)
                 {
                     if (index.TypeId != RW4_MODEL_TYPE_ID) continue;
-                    string baseName = string.Format("{0:x8}-{1:x8}-{2:x8}",
+                    string fallback = string.Format("{0:x8}-{1:x8}-{2:x8}",
                         index.TypeId, index.GroupContainer, index.InstanceId);
-                    handle(index.GetIndexData(true), baseName);
+                    handle(index.GetIndexData(true), ResolveBaseName(index.InstanceId, fallback, nameMap, used));
                 }
             }
             else if (File.Exists(input))
@@ -343,11 +463,15 @@ namespace SimCityPak.Cli
             else if (input.EndsWith(".package", StringComparison.OrdinalIgnoreCase))
             {
                 DatabasePackedFile package = DatabasePackedFile.LoadFromFile(input);
+                var nameMap = BuildLocaleNameMap(package, GetLocaleFile(args));
+                if (nameMap.Count > 0) Console.WriteLine("(using " + nameMap.Count + " localized names from the locale file)");
+                var used = new HashSet<string>();
                 foreach (DatabaseIndex index in package.Indices)
                 {
                     if (index.TypeId != PROP_TYPE_ID) continue;
-                    string baseName = string.Format("{0:x8}-{1:x8}-{2:x8}",
+                    string fallback = string.Format("{0:x8}-{1:x8}-{2:x8}",
                         index.TypeId, index.GroupContainer, index.InstanceId);
+                    string baseName = ResolveBaseName(index.InstanceId, fallback, nameMap, used);
                     try
                     {
                         var pf = new PropertyFile(index);
