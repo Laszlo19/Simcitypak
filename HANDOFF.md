@@ -129,8 +129,12 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
   Validated on `SimCity_DLC0.package` + `Locale\en-us\Data.package`: 507 names, models/props out as
   "Maxis Manor", "Baccarat Room", "Airship Hangar", etc. Locale at
   `C:\Games\SimCity\SimCityData\Locale\en-us\Data.package`. Loose-file / folder input has no name
-  source, so it keeps hashes. NOTE: the GUI's single-export menus still use the old names — only the
-  CLI exports are localized so far.
+  source, so it keeps hashes.
+  **GUI too:** `MainWindow.mnuInstanceIds_Click` ("Load instance names from locale") now also maps
+  models referenced by props (new `CollectModelNames`), so `GetExportFileName` (already
+  `SCP_<InstanceName>_<TGI>`) localizes the model/texture "Export Instance". The OBJ/DDS/BMP/PNG
+  sub-view exporters pre-fill their SaveFileDialog from `MainWindow.SelectedExportName` (set on
+  selection). Both CLI + GUI changes live on branch `feature/locale-export-names`.
   - `export-audio <input> <outputDir>` — Wwise Vorbis (type id `0x0d9e5710`) → PCM .wav. Tested OK
     (output verified `pcm_s16le`). Drives **bundled vgmstream** at `SimCityPak\Tools\vgmstream\`
     (committed; copied next to the exe via a `<Content>` item with CopyToOutputDirectory). The
