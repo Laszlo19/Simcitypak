@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using Gibbed.Spore.Package;
+using Gibbed.Spore.Properties;
 using SporeMaster.RenderWare4;
 
 namespace SimCityPak.Cli
@@ -27,6 +30,9 @@ namespace SimCityPak.Cli
         // the "0x0d9e5710" in the extracted "SCP_0x0d9e5710-..." file names).
         private const uint AUDIO_TYPE_ID = 0x0d9e5710;
 
+        // SimCity 2013 type id for a property list (.prop) resource.
+        private const uint PROP_TYPE_ID = 0x00b1b104;
+
         [DllImport("kernel32.dll")]
         private static extern bool AttachConsole(int dwProcessId);
         private const int ATTACH_PARENT_PROCESS = -1;
@@ -40,6 +46,7 @@ namespace SimCityPak.Cli
                 case "export-obj":
                 case "export-gltf":
                 case "export-texture":
+                case "export-prop":
                 case "export-audio":
                 case "help":
                 case "--help":
@@ -69,6 +76,8 @@ namespace SimCityPak.Cli
                         return RunExportModels(args, ".glb", (m, p) => new GltfConverter().Export(m, p));
                     case "export-texture":
                         return RunExportTextures(args);
+                    case "export-prop":
+                        return RunExportProp(args);
                     case "export-audio":
                         return RunExportAudio(args);
                     default:
@@ -91,6 +100,7 @@ namespace SimCityPak.Cli
             Console.WriteLine("  SimCityPak.exe export-obj     <input> <outputDir>");
             Console.WriteLine("  SimCityPak.exe export-gltf    <input> <outputDir>");
             Console.WriteLine("  SimCityPak.exe export-texture <input> <outputDir>");
+            Console.WriteLine("  SimCityPak.exe export-prop    <input> <outputDir>");
             Console.WriteLine("  SimCityPak.exe export-audio   <input> <outputDir>");
             Console.WriteLine();
             Console.WriteLine("  <input> may be:");
@@ -101,6 +111,7 @@ namespace SimCityPak.Cli
             Console.WriteLine("  export-obj     : RW4 models   -> Wavefront .obj  (<name>[_meshN].obj)");
             Console.WriteLine("  export-gltf    : RW4 models   -> binary glTF .glb (<name>[_meshN].glb)");
             Console.WriteLine("  export-texture : RW4 textures -> .dds images     (<name>[_texN].dds)");
+            Console.WriteLine("  export-prop    : .prop property lists -> readable .txt dump");
             Console.WriteLine("  export-audio   : Wwise Vorbis audio -> PCM .wav (via bundled vgmstream)");
             Console.WriteLine();
             Console.WriteLine("Examples:");
@@ -297,6 +308,101 @@ namespace SimCityPak.Cli
                 }
             }
             return written;
+        }
+
+        // ----- export-prop --------------------------------------------------
+
+        private static int RunExportProp(string[] args)
+        {
+            if (args.Length < 3)
+            {
+                Console.WriteLine("Usage: SimCityPak.exe export-prop <input> <outputDir>");
+                return 2;
+            }
+            string input = args[1];
+            string outDir = args[2];
+            Directory.CreateDirectory(outDir);
+
+            int ok = 0, fails = 0;
+
+            if (Directory.Exists(input))
+            {
+                foreach (string file in Directory.GetFiles(input, "*.prop"))
+                {
+                    string baseName = Path.GetFileNameWithoutExtension(file);
+                    try
+                    {
+                        var pf = new PropertyFile();
+                        using (var ms = new MemoryStream(File.ReadAllBytes(file))) pf.Read(ms);
+                        DumpProp(pf, Path.Combine(outDir, baseName + ".txt"), baseName);
+                        ok++; Console.WriteLine("OK   " + baseName + ".txt");
+                    }
+                    catch (Exception ex) { fails++; Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
+                }
+            }
+            else if (input.EndsWith(".package", StringComparison.OrdinalIgnoreCase))
+            {
+                DatabasePackedFile package = DatabasePackedFile.LoadFromFile(input);
+                foreach (DatabaseIndex index in package.Indices)
+                {
+                    if (index.TypeId != PROP_TYPE_ID) continue;
+                    string baseName = string.Format("{0:x8}-{1:x8}-{2:x8}",
+                        index.TypeId, index.GroupContainer, index.InstanceId);
+                    try
+                    {
+                        var pf = new PropertyFile(index);
+                        DumpProp(pf, Path.Combine(outDir, baseName + ".txt"), baseName);
+                        ok++; Console.WriteLine("OK   " + baseName + ".txt");
+                    }
+                    catch (Exception ex) { fails++; Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
+                }
+            }
+            else if (File.Exists(input))
+            {
+                string baseName = Path.GetFileNameWithoutExtension(input);
+                try
+                {
+                    var pf = new PropertyFile();
+                    using (var ms = new MemoryStream(File.ReadAllBytes(input))) pf.Read(ms);
+                    DumpProp(pf, Path.Combine(outDir, baseName + ".txt"), baseName);
+                    ok++; Console.WriteLine("OK   " + baseName + ".txt");
+                }
+                catch (Exception ex) { fails++; Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
+            }
+            else
+            {
+                Console.WriteLine("ERROR: input not found: " + input);
+                return 2;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine(string.Format("Done. dumped={0} failed={1}", ok, fails));
+            Console.WriteLine("Output: " + Path.GetFullPath(outDir));
+            return fails > 0 ? 1 : 0;
+        }
+
+        /// <summary>Writes a property file's values to a readable text dump (sorted by hash).</summary>
+        private static void DumpProp(PropertyFile pf, string outPath, string name)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("# SimCityPak property dump: " + name);
+            sb.AppendLine("# properties: " + pf.Values.Count);
+            sb.AppendLine();
+
+            var keys = new List<uint>(pf.Values.Keys);
+            keys.Sort();
+            foreach (uint hash in keys)
+            {
+                Property p = pf.Values[hash];
+                string typeName = p == null ? "null" : p.GetType().Name;
+                if (typeName.EndsWith("Property")) typeName = typeName.Substring(0, typeName.Length - 8);
+                string value;
+                try { value = p == null ? "" : p.DisplayValue; }
+                catch (Exception ex) { value = "<error: " + ex.Message + ">"; }
+                sb.AppendFormat("0x{0:x8}  {1,-14} = {2}\r\n", hash, typeName, value);
+            }
+
+            File.WriteAllText(outPath, sb.ToString());
         }
 
         // ----- export-audio -------------------------------------------------

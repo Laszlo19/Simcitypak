@@ -19,6 +19,7 @@ Run the same `SimCityPak.exe` headlessly to mass-export assets — no GUI.
 SimCityPak.exe export-obj     <input> <outputDir>  # RW4 models   -> Wavefront .obj
 SimCityPak.exe export-gltf    <input> <outputDir>  # RW4 models   -> binary glTF 2.0 (.glb)
 SimCityPak.exe export-texture <input> <outputDir>  # RW4 textures -> .dds images
+SimCityPak.exe export-prop    <input> <outputDir>  # .prop property lists -> readable .txt
 SimCityPak.exe export-audio   <input> <outputDir>  # Wwise Vorbis audio -> playable PCM .wav
 SimCityPak.exe help                                # usage
 ```
@@ -40,6 +41,10 @@ For every command, `<input>` may be:
   (`<name>[_texN].dds`). Block-compressed (DXT1/DXT5) textures are supported; raw-bitmap
   textures (`textureType 21`) are skipped. Open in any DDS viewer, or convert with
   `ffmpeg -i tex.dds tex.png`.
+- **`export-prop`** dumps **property-list (`.prop`) resources** (type `0x00b1b104`) to a
+  readable `.txt` — one line per property: `0x<hash>  <Type>  = <value>`, sorted by hash.
+  Handles all property types (Float, Bool, Key/TGI, Vector2/3/4, Color, BoundingBox,
+  Transform, String8/16, arrays, …). Useful for inspecting building/gameplay tuning.
 - **`export-audio`** decodes SimCity's Audiokinetic **Wwise Vorbis** audio (RIFF with
   codec `0xFFFF`, which normal players reject) into standard PCM `.wav`. It uses
   **[vgmstream](https://github.com/vgmstream/vgmstream)**, bundled in `Tools\vgmstream\`

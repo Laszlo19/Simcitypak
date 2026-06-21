@@ -42,6 +42,11 @@ was already removed from both before the move — regenerate via §6 if needed.)
 - **git:** installed, user `Laszlo19` / laszlotamas108yahoo.com@gmail.com. **No `gh` CLI.**
 - **nuget.exe:** `C:\Projects\simcitypak\simcity sounds\_tools\nuget.exe`
 - **ffmpeg/ffprobe:** on PATH.
+- **SimCity game install:** `C:\Games\SimCity\` (123 `.package` files under `SimCityData\` and
+  `SimCityUserData\`). Real test data for the CLI — e.g.
+  `SimCityData\Oppie_OFFLINE_CentralTrainStation.package` has RW4 models, textures and .prop
+  files. The big base packages: `SimCity_App.package` (302 MB),
+  `SimCityDataEP1.package` (391 MB), audio in `SimCity_Audio_*.package`.
 
 ---
 
@@ -103,6 +108,15 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     decode, so it's headless. Tested: DXT1/DXT5 .dds, ffmpeg decodes to valid RGBA PNG.
     Raw-bitmap textures (textureType 21) are skipped (NotSupportedException → SKIP), not failed.
     TODO: support type 21, and an optional direct-to-PNG mode.
+  - `export-prop <input> <outputDir>` — property lists (type 0x00b1b104) → readable .txt.
+    Uses the app's own `Gibbed.Spore.Properties.PropertyFile` (`.Read(stream)` or the
+    `PropertyFile(index)` ctor) and each `Property.DisplayValue`; `DumpProp` writes
+    `0x<hash8>  <Type>  = <value>` sorted by hash. Tested on REAL game data
+    (`C:\Games\SimCity\SimCityData\Oppie_OFFLINE_CentralTrainStation.package`): 3 prop files,
+    94 props each, correct Float/Bool/Key/Vector2/BoundingBox/Transform/array values.
+    Polish TODO: `DisplayValue` uses CurrentCulture so decimals are locale-formatted (commas on
+    a HU machine), which makes Transform/array values ambiguous; an invariant-culture dump mode
+    would be cleaner. FNV key hashes are printed as hex (no name lookup yet).
   - `export-audio <input> <outputDir>` — Wwise Vorbis (type id `0x0d9e5710`) → PCM .wav. Tested OK
     (output verified `pcm_s16le`). Drives **bundled vgmstream** at `SimCityPak\Tools\vgmstream\`
     (committed; copied next to the exe via a `<Content>` item with CopyToOutputDirectory). The
