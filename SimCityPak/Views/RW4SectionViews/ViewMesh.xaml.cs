@@ -143,9 +143,9 @@ namespace SimCityPak
 
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
-
+                    Logger.Exception("ViewMesh.DataContextChanged (3D mesh preview)", ex);
                 }
                 viewPort.ZoomExtents();
             }

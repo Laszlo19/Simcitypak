@@ -67,6 +67,8 @@
                 <MenuItem Header="Reload packages" Click="ReloadPackages_click" />
                 <MenuItem Header="Close all packages" Click="CloseAllPackages_click" />
                 <Separator/>
+                <MenuItem Header="Export all models + textures to folder..." Click="mnuExportAll_Click" />
+                <Separator/>
                 <MenuItem Header="Exit" Click="Exit_click" />
             </MenuItem>
             <MenuItem Header="Search">

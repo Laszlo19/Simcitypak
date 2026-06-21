@@ -56,9 +56,62 @@ namespace SimCityPak
 
         private void loadPackagesFromPath(string[] paths)
         {
-            DatabaseManager.Instance.LoadPackages(paths);
-            this.Title = "SimCityPak";
-            mnuSearchPROP.IsEnabled = true;
+            Logger.Info("Loading packages: " + string.Join(", ", paths));
+            try
+            {
+                DatabaseManager.Instance.LoadPackages(paths);
+                this.Title = "SimCityPak";
+                mnuSearchPROP.IsEnabled = true;
+                Logger.Info("Loaded packages; total resources: " + DatabaseManager.Instance.Indices.Count);
+            }
+            catch (Exception ex)
+            {
+                Logger.Exception("loadPackagesFromPath", ex);
+                throw;
+            }
+        }
+
+        /// <summary>File ▸ Export all models + textures to folder. Exports every loaded
+        /// RW4 model as .glb and its textures as .dds, named by localized asset name.</summary>
+        private void mnuExportAll_Click(object sender, RoutedEventArgs e)
+        {
+            if (DatabaseManager.Instance.Indices == null || DatabaseManager.Instance.Indices.Count == 0)
+            {
+                System.Windows.MessageBox.Show("Open a package first.", "SimCityPak",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            string folder;
+            using (FolderBrowserDialog dlg = new FolderBrowserDialog())
+            {
+                dlg.Description = "Choose a folder to export all models (.glb) and textures (.dds) into";
+                dlg.ShowNewFolderButton = true;
+                if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+                folder = dlg.SelectedPath;
+            }
+
+            Logger.Info("GUI: export all -> " + folder);
+            var indices = DatabaseManager.Instance.Indices.ToList();   // snapshot for the worker thread
+            string locale = Properties.Settings.Default.LocaleFile;
+            System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
+
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                string summary;
+                try { summary = Cli.CliRunner.ExportAllToFolder(indices, folder, locale); }
+                catch (Exception ex)
+                {
+                    Logger.Exception("GUI export-all", ex);
+                    summary = "Export failed: " + ex.Message + "\n\nSee the log in " + Logger.LogDirectory;
+                }
+                Dispatcher.Invoke(() =>
+                {
+                    System.Windows.Input.Mouse.OverrideCursor = null;
+                    System.Windows.MessageBox.Show(summary + "\n\nFolder: " + folder, "Export all",
+                        MessageBoxButton.OK, MessageBoxImage.Information);
+                });
+            });
         }
 
         /// <summary>
@@ -75,6 +128,8 @@ namespace SimCityPak
                 {
                     DatabaseIndex index = (DatabaseIndex)e.AddedItems[0];
                     SelectedExportName = Path.GetFileNameWithoutExtension(index.GetExportFileName());
+                    Logger.Debug(string.Format("Selected resource T:0x{0:x8} G:0x{1:x8} I:0x{2:x8} ({3})",
+                        index.TypeId, index.GroupContainer, index.InstanceId, index.InstanceName));
                     byte[] data;
                     if (index.IsModified)
                     {
