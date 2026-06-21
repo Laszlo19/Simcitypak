@@ -269,6 +269,40 @@ namespace SimCityPak
             window.ShowDialog();
         }
 
+        /// <summary>Context menu: export a property (.prop) resource to a readable TXT/JSON
+        /// file with resolved property names (same dump as the CLI export-prop).</summary>
+        private void mnuExportProperties_Click(object sender, RoutedEventArgs e)
+        {
+            DatabaseIndex index = (DatabaseIndex)((MenuItem)sender).DataContext;
+            if (index.TypeId != 0x00b1b104)
+            {
+                System.Windows.MessageBox.Show("This resource is not a property (.prop) file.",
+                    "SimCityPak", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            SaveFileDialog dlg = new SaveFileDialog();
+            dlg.Filter = "Text|*.txt|JSON|*.json";
+            dlg.DefaultExt = ".txt";
+            dlg.FileName = Path.GetFileNameWithoutExtension(index.GetExportFileName());
+            if (!dlg.ShowDialog().GetValueOrDefault(false)) return;
+
+            bool json = dlg.FilterIndex == 2 || dlg.FileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+            try
+            {
+                PropertyFile pf = new PropertyFile(index);
+                Cli.CliRunner.DumpPropertyFile(pf, dlg.FileName,
+                    Path.GetFileNameWithoutExtension(dlg.FileName), json);
+                Logger.Info("Exported properties -> " + dlg.FileName);
+            }
+            catch (Exception ex)
+            {
+                Logger.Exception("mnuExportProperties", ex);
+                System.Windows.MessageBox.Show("Export failed: " + ex.Message,
+                    "SimCityPak", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
         private void mnuExportInstance_Click(object sender, RoutedEventArgs e)
         {
             if (dataGridInstances.SelectedItems.Count > 1)

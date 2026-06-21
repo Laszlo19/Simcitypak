@@ -34,6 +34,10 @@ namespace SimCityPak.Cli
         // SimCity 2013 type id for a property list (.prop) resource.
         private const uint PROP_TYPE_ID = 0x00b1b104;
 
+        // "Model Details (PROP)" property: a catalog prop's Key reference to the
+        // model/gameplay asset instance it belongs to. Used by --combine.
+        private const uint MODEL_DETAILS_HASH = 0x0975695f;
+
         [DllImport("kernel32.dll")]
         private static extern bool AttachConsole(int dwProcessId);
         private const int ATTACH_PARENT_PROCESS = -1;
@@ -116,11 +120,12 @@ namespace SimCityPak.Cli
             Console.WriteLine();
             Console.WriteLine("  export-obj     : RW4 models   -> Wavefront .obj  (<name>[_meshN].obj)");
             Console.WriteLine("  export-gltf    : RW4 models   -> binary glTF .glb (<name>[_meshN].glb)");
-            Console.WriteLine("  export-texture : RW4 textures -> .dds images     (<name>[_texN].dds)");
+            Console.WriteLine("  export-texture : RW4 textures -> images (--format png|jpg|tga|dds, default png)");
             Console.WriteLine("  export-prop    : .prop property lists -> readable .txt (or .json with --json),");
-            Console.WriteLine("                   property names resolved where SimCityPak knows them");
+            Console.WriteLine("                   property names resolved; --combine merges an asset's model +");
+            Console.WriteLine("                   gameplay + catalog props into one file (package input)");
             Console.WriteLine("  export-audio   : Wwise Vorbis audio -> PCM .wav (via bundled vgmstream)");
-            Console.WriteLine("  export-all     : every model -> .glb AND every texture -> .dds, one folder");
+            Console.WriteLine("  export-all     : every model -> .glb AND every texture -> image, one folder");
             Console.WriteLine();
             Console.WriteLine("  When exporting from a .package, add  --locale <Locale\\xx-xx\\Data.package>");
             Console.WriteLine("  (or set it in the GUI Settings) to name files by their localized asset");
@@ -220,7 +225,11 @@ namespace SimCityPak.Cli
                 model.Read(ms);
 
             var meshSections = model.Sections
-                .Where(s => s.TypeCode == SectionTypeCodes.Mesh && s.obj is RW4Mesh)
+                .Where(s => s.TypeCode == SectionTypeCodes.Mesh && s.obj is RW4Mesh
+                            && ((RW4Mesh)s.obj).vertices != null
+                            && ((RW4Mesh)s.obj).vertices.vertices != null
+                            && ((RW4Mesh)s.obj).triangles != null
+                            && ((RW4Mesh)s.obj).triangles.triangles != null)
                 .ToList();
 
             int written = 0;
@@ -351,12 +360,13 @@ namespace SimCityPak.Cli
         {
             if (args.Length < 3)
             {
-                Console.WriteLine("Usage: SimCityPak.exe export-texture <input> <outputDir>");
+                Console.WriteLine("Usage: SimCityPak.exe export-texture <input> <outputDir> [--format png|jpg|tga|dds]");
                 return 2;
             }
             string input = args[1];
             string outDir = args[2];
             Directory.CreateDirectory(outDir);
+            string format = GetTextureFormat(args);
 
             int res = 0, textures = 0, fails = 0;
 
@@ -364,7 +374,7 @@ namespace SimCityPak.Cli
             {
                 try
                 {
-                    int t = ExportRw4Textures(data, outDir, baseName);
+                    int t = ExportRw4Textures(data, outDir, baseName, format);
                     if (t > 0) { res++; textures += t; }
                     else Console.WriteLine("SKIP " + baseName + " (no texture)");
                 }
@@ -401,13 +411,54 @@ namespace SimCityPak.Cli
             }
 
             Console.WriteLine();
-            Console.WriteLine(string.Format("Done. resources={0} textures(dds)={1} failed={2}", res, textures, fails));
+            Console.WriteLine(string.Format("Done. resources={0} textures({1})={2} failed={3}", res, format, textures, fails));
             Console.WriteLine("Output: " + Path.GetFullPath(outDir));
             return fails > 0 ? 1 : 0;
         }
 
         /// <summary>Parses RW4 bytes and writes each Texture section as a .dds.</summary>
-        private static int ExportRw4Textures(byte[] data, string outDir, string baseName)
+        /// <summary>Texture output format from --format (png|jpg|tga|dds); default png.</summary>
+        private static string GetTextureFormat(string[] args)
+        {
+            for (int i = 0; i < args.Length - 1; i++)
+                if (args[i].Equals("--format", StringComparison.OrdinalIgnoreCase))
+                {
+                    string fmt = args[i + 1].ToLowerInvariant().TrimStart('.');
+                    if (fmt == "jpeg") fmt = "jpg";
+                    if (fmt == "png" || fmt == "jpg" || fmt == "tga" || fmt == "dds") return fmt;
+                }
+            return "png";
+        }
+
+        private static void SaveBitmap(System.Drawing.Bitmap bmp, string path, string format)
+        {
+            if (format == "jpg") bmp.Save(path, System.Drawing.Imaging.ImageFormat.Jpeg);
+            else if (format == "tga") SaveTga(bmp, path);
+            else bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+        }
+
+        private static void SaveTga(System.Drawing.Bitmap bmp, string path)
+        {
+            int w = bmp.Width, h = bmp.Height;
+            var bd = bmp.LockBits(new System.Drawing.Rectangle(0, 0, w, h),
+                System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            byte[] bgra = new byte[w * h * 4];
+            System.Runtime.InteropServices.Marshal.Copy(bd.Scan0, bgra, 0, bgra.Length);
+            bmp.UnlockBits(bd);
+            using (var fs = File.Create(path))
+            using (var bw = new BinaryWriter(fs))
+            {
+                bw.Write((byte)0); bw.Write((byte)0); bw.Write((byte)2);     // uncompressed true-color
+                bw.Write((short)0); bw.Write((short)0); bw.Write((byte)0);   // color map spec
+                bw.Write((short)0); bw.Write((short)0);                      // x/y origin
+                bw.Write((short)w); bw.Write((short)h);
+                bw.Write((byte)32);                                         // 32 bpp (BGRA)
+                bw.Write((byte)0x20);                                       // top-left origin, 8 alpha bits
+                bw.Write(bgra);                                            // BGRA, top-down
+            }
+        }
+
+        private static int ExportRw4Textures(byte[] data, string outDir, string baseName, string format)
         {
             RW4Model model = new RW4Model();
             using (var ms = new MemoryStream(data))
@@ -422,10 +473,25 @@ namespace SimCityPak.Cli
             {
                 Texture tex = (Texture)texSections[i].obj;
                 string suffix = texSections.Count > 1 ? ("_tex" + i) : "";
-                string outPath = Path.Combine(outDir, baseName + suffix + ".dds");
+                string outPath = Path.Combine(outDir, baseName + suffix + "." + format);
                 try
                 {
-                    tex.SaveDds(outPath);
+                    if (format == "dds")
+                    {
+                        tex.SaveDds(outPath);
+                    }
+                    else
+                    {
+                        using (System.Drawing.Bitmap bmp = GltfConverter.DecodeTextureToBitmap(tex))
+                        {
+                            if (bmp == null)
+                            {
+                                Console.WriteLine("SKIP " + baseName + suffix + " (unsupported texture format)");
+                                continue;
+                            }
+                            SaveBitmap(bmp, outPath, format);
+                        }
+                    }
                     written++;
                     Console.WriteLine("OK   " + Path.GetFileName(outPath));
                 }
@@ -453,6 +519,15 @@ namespace SimCityPak.Cli
 
             bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
             string ext = json ? ".json" : ".txt";
+
+            // --combine: one file per asset, merging the model + gameplay + catalog
+            // props that belong together (package input only).
+            if (args.Any(a => a.Equals("--combine", StringComparison.OrdinalIgnoreCase))
+                && input.EndsWith(".package", StringComparison.OrdinalIgnoreCase))
+            {
+                return RunExportPropCombined(input, outDir, GetLocaleFile(args), json);
+            }
+
             int ok = 0, fails = 0;
 
             if (Directory.Exists(input))
@@ -464,7 +539,7 @@ namespace SimCityPak.Cli
                     {
                         var pf = new PropertyFile();
                         using (var ms = new MemoryStream(File.ReadAllBytes(file))) pf.Read(ms);
-                        DumpProp(pf, Path.Combine(outDir, baseName + ext), baseName, json);
+                        DumpPropertyFile(pf, Path.Combine(outDir, baseName + ext), baseName, json);
                         ok++; Console.WriteLine("OK   " + baseName + ext);
                     }
                     catch (Exception ex) { fails++; Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
@@ -485,7 +560,7 @@ namespace SimCityPak.Cli
                     try
                     {
                         var pf = new PropertyFile(index);
-                        DumpProp(pf, Path.Combine(outDir, baseName + ext), baseName, json);
+                        DumpPropertyFile(pf, Path.Combine(outDir, baseName + ext), baseName, json);
                         ok++; Console.WriteLine("OK   " + baseName + ext);
                     }
                     catch (Exception ex) { fails++; Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
@@ -498,7 +573,7 @@ namespace SimCityPak.Cli
                 {
                     var pf = new PropertyFile();
                     using (var ms = new MemoryStream(File.ReadAllBytes(input))) pf.Read(ms);
-                    DumpProp(pf, Path.Combine(outDir, baseName + ext), baseName, json);
+                    DumpPropertyFile(pf, Path.Combine(outDir, baseName + ext), baseName, json);
                     ok++; Console.WriteLine("OK   " + baseName + ext);
                 }
                 catch (Exception ex) { fails++; Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
@@ -543,6 +618,178 @@ namespace SimCityPak.Cli
         {
             try { return p == null ? "" : p.DisplayValue; }
             catch (Exception ex) { return "<error: " + ex.Message + ">"; }
+        }
+
+        /// <summary>
+        /// --combine: groups a package's prop resources into assets (props sharing an
+        /// InstanceId belong together; a catalog prop's "Model Details" reference is unioned
+        /// with the instance it points to) and writes ONE file per asset, merging the model,
+        /// gameplay and catalog props. Named by the asset's localized name when known.
+        /// </summary>
+        private static int RunExportPropCombined(string input, string outDir, string localeFile, bool json)
+        {
+            DatabasePackedFile package = DatabasePackedFile.LoadFromFile(input);
+            var nameMap = BuildLocaleNameMap(package.Indices, localeFile);
+            if (nameMap.Count > 0) Console.WriteLine("(using " + nameMap.Count + " localized names from the locale file)");
+
+            var props = new List<KeyValuePair<DatabaseIndex, PropertyFile>>();
+            foreach (DatabaseIndex index in package.Indices)
+            {
+                if (index.TypeId != PROP_TYPE_ID) continue;
+                try { props.Add(new KeyValuePair<DatabaseIndex, PropertyFile>(index, new PropertyFile(index))); }
+                catch (Exception ex) { Logger.Exception("combine read prop", ex); }
+            }
+            int n = props.Count;
+
+            // Union-Find over the props.
+            int[] parent = new int[n];
+            for (int i = 0; i < n; i++) parent[i] = i;
+            Func<int, int> find = null;
+            find = x => { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+            Action<int, int> union = (a, b) => { int ra = find(a), rb = find(b); if (ra != rb) parent[ra] = rb; };
+
+            var firstByInstance = new Dictionary<uint, int>();
+            for (int i = 0; i < n; i++)
+            {
+                uint inst = props[i].Key.InstanceId;
+                int other;
+                if (firstByInstance.TryGetValue(inst, out other)) union(i, other);  // same asset instance
+                else firstByInstance[inst] = i;
+            }
+            for (int i = 0; i < n; i++)
+            {
+                Property md;
+                if (props[i].Value.Values.TryGetValue(MODEL_DETAILS_HASH, out md))
+                {
+                    KeyProperty kp = md as KeyProperty;
+                    int target;
+                    if (kp != null && firstByInstance.TryGetValue(kp.InstanceId, out target)) union(i, target);
+                }
+            }
+
+            var groups = new Dictionary<int, List<int>>();
+            for (int i = 0; i < n; i++)
+            {
+                int r = find(i);
+                List<int> g;
+                if (!groups.TryGetValue(r, out g)) { g = new List<int>(); groups[r] = g; }
+                g.Add(i);
+            }
+
+            var used = new HashSet<string>();
+            int ok = 0, fails = 0;
+            foreach (var g in groups.Values)
+            {
+                // sort facets by group container for stable output
+                g.Sort((a, b) => props[a].Key.GroupContainer.CompareTo(props[b].Key.GroupContainer));
+                string name = null;
+                uint assetInst = props[g[0]].Key.InstanceId;
+                foreach (int i in g)
+                {
+                    string nm;
+                    if (nameMap.TryGetValue(props[i].Key.InstanceId, out nm)) { name = nm; break; }
+                }
+                string baseName = UniqueName(name, string.Format("{0:x8}", assetInst), used);
+                string outPath = Path.Combine(outDir, baseName + (json ? ".json" : ".txt"));
+                try
+                {
+                    var members = new List<KeyValuePair<DatabaseIndex, PropertyFile>>();
+                    foreach (int i in g) members.Add(props[i]);
+                    DumpCombined(members, outPath, name ?? baseName, json);
+                    ok++; Console.WriteLine("OK   " + Path.GetFileName(outPath) + "  (" + g.Count + " props)");
+                }
+                catch (Exception ex) { fails++; Logger.Exception("combine dump " + baseName, ex); Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
+            }
+
+            Console.WriteLine();
+            Console.WriteLine(string.Format("Done. assets={0} (from {1} props) failed={2}", ok, n, fails));
+            Console.WriteLine("Output: " + Path.GetFullPath(outDir));
+            return fails > 0 ? 1 : 0;
+        }
+
+        private static string UniqueName(string name, string fallback, HashSet<string> used)
+        {
+            string baseName = Sanitize(string.IsNullOrEmpty(name) ? fallback : name);
+            string candidate = baseName;
+            int k = 2;
+            while (used.Contains(candidate.ToLowerInvariant())) candidate = baseName + "_" + (k++);
+            used.Add(candidate.ToLowerInvariant());
+            return candidate;
+        }
+
+        /// <summary>Writes several property files into one combined dump (one section per
+        /// resource), with resolved names and invariant-culture numbers.</summary>
+        private static void DumpCombined(List<KeyValuePair<DatabaseIndex, PropertyFile>> members,
+            string outPath, string name, bool json)
+        {
+            var prev = System.Threading.Thread.CurrentThread.CurrentCulture;
+            System.Threading.Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+            try
+            {
+                if (json)
+                {
+                    var resources = new List<object>();
+                    foreach (var m in members)
+                    {
+                        var keys = new List<uint>(m.Value.Values.Keys); keys.Sort();
+                        var pl = new List<object>();
+                        foreach (uint hash in keys)
+                        {
+                            Property p = m.Value.Values[hash];
+                            pl.Add(new Dictionary<string, object>
+                            {
+                                ["name"] = PropName(hash),
+                                ["hash"] = "0x" + hash.ToString("x8"),
+                                ["type"] = PropTypeName(p),
+                                ["value"] = PropValue(p)
+                            });
+                        }
+                        resources.Add(new Dictionary<string, object>
+                        {
+                            ["type"] = "0x" + m.Key.TypeId.ToString("x8"),
+                            ["group"] = "0x" + m.Key.GroupContainer.ToString("x8"),
+                            ["instance"] = "0x" + m.Key.InstanceId.ToString("x8"),
+                            ["propertyCount"] = m.Value.Values.Count,
+                            ["properties"] = pl
+                        });
+                    }
+                    var root = new Dictionary<string, object> { ["name"] = name, ["resourceCount"] = members.Count, ["resources"] = resources };
+                    File.WriteAllText(outPath, JsonConvert.SerializeObject(root, Formatting.Indented));
+                    return;
+                }
+
+                var sb = new StringBuilder();
+                sb.AppendLine("# SimCityPak combined property dump: " + name);
+                sb.AppendLine("# resources: " + members.Count);
+                sb.AppendLine();
+                foreach (var m in members)
+                {
+                    sb.AppendFormat("== T:0x{0:x8} G:0x{1:x8} I:0x{2:x8}  ({3} properties) ==\r\n",
+                        m.Key.TypeId, m.Key.GroupContainer, m.Key.InstanceId, m.Value.Values.Count);
+                    var keys = new List<uint>(m.Value.Values.Keys); keys.Sort();
+                    foreach (uint hash in keys)
+                    {
+                        Property p = m.Value.Values[hash];
+                        string pname = PropName(hash);
+                        string label = pname != null ? string.Format("{0} [0x{1:x8}]", pname, hash) : string.Format("0x{0:x8}", hash);
+                        sb.AppendFormat("{0,-44} {1,-12} = {2}\r\n", label, PropTypeName(p), PropValue(p));
+                    }
+                    sb.AppendLine();
+                }
+                File.WriteAllText(outPath, sb.ToString());
+            }
+            finally { System.Threading.Thread.CurrentThread.CurrentCulture = prev; }
+        }
+
+        /// <summary>Writes a property file as readable text or JSON, resolving property
+        /// names where SimCityPak knows them, with invariant-culture numbers ('.' decimals).
+        /// Public so the GUI can reuse the exact same dump. Sorted by hash.</summary>
+        public static void DumpPropertyFile(PropertyFile pf, string outPath, string name, bool json)
+        {
+            var prev = System.Threading.Thread.CurrentThread.CurrentCulture;
+            System.Threading.Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+            try { DumpProp(pf, outPath, name, json); }
+            finally { System.Threading.Thread.CurrentThread.CurrentCulture = prev; }
         }
 
         /// <summary>Writes a property file as readable text or JSON, resolving property
@@ -598,19 +845,20 @@ namespace SimCityPak.Cli
         {
             if (args.Length < 3)
             {
-                Console.WriteLine("Usage: SimCityPak.exe export-all <input> <outputDir> [--locale <pkg>]");
+                Console.WriteLine("Usage: SimCityPak.exe export-all <input> <outputDir> [--format png|jpg|tga|dds] [--locale <pkg>]");
                 return 2;
             }
             string input = args[1];
             string outDir = args[2];
             Directory.CreateDirectory(outDir);
+            string format = GetTextureFormat(args);
 
-            int glb = 0, dds = 0, fails = 0;
+            int glb = 0, tex = 0, fails = 0;
             Action<byte[], string> handle = (data, baseName) =>
             {
                 try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter().Export(m, p)); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all model " + baseName, ex); Console.WriteLine("FAIL " + baseName + " (model) :: " + ex.Message); }
-                try { dds += ExportRw4Textures(data, outDir, baseName); }
+                try { tex += ExportRw4Textures(data, outDir, baseName, format); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all textures " + baseName, ex); Console.WriteLine("FAIL " + baseName + " (textures) :: " + ex.Message); }
             };
 
@@ -645,7 +893,7 @@ namespace SimCityPak.Cli
             }
 
             Console.WriteLine();
-            Console.WriteLine(string.Format("Done. models(glb)={0} textures(dds)={1} failed={2}", glb, dds, fails));
+            Console.WriteLine(string.Format("Done. models(glb)={0} textures({1})={2} failed={3}", glb, format, tex, fails));
             Console.WriteLine("Output: " + Path.GetFullPath(outDir));
             return fails > 0 ? 1 : 0;
         }
@@ -656,13 +904,13 @@ namespace SimCityPak.Cli
         /// <paramref name="localeFile"/> is provided. Returns a short summary; used by
         /// the GUI "Export all" menu. Never throws (errors are logged per resource).
         /// </summary>
-        public static string ExportAllToFolder(IEnumerable<DatabaseIndex> indices, string outDir, string localeFile)
+        public static string ExportAllToFolder(IEnumerable<DatabaseIndex> indices, string outDir, string localeFile, string format = "png")
         {
             Directory.CreateDirectory(outDir);
-            Logger.Info("Export-all -> " + outDir + (string.IsNullOrEmpty(localeFile) ? "" : " (locale: " + localeFile + ")"));
+            Logger.Info("Export-all -> " + outDir + " (textures: " + format + ")" + (string.IsNullOrEmpty(localeFile) ? "" : " (locale: " + localeFile + ")"));
             var nameMap = BuildLocaleNameMap(indices, localeFile);
             var used = new HashSet<string>();
-            int glb = 0, dds = 0, fails = 0;
+            int glb = 0, tex = 0, fails = 0;
             foreach (DatabaseIndex index in indices)
             {
                 if (index.TypeId != RW4_MODEL_TYPE_ID) continue;
@@ -674,12 +922,12 @@ namespace SimCityPak.Cli
                 catch (Exception ex) { fails++; Logger.Exception("export-all read " + baseName, ex); continue; }
                 try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter().Export(m, p)); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all model " + baseName, ex); }
-                try { dds += ExportRw4Textures(data, outDir, baseName); }
+                try { tex += ExportRw4Textures(data, outDir, baseName, format); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all textures " + baseName, ex); }
             }
             string summary = string.Format(
-                "Exported {0} models (.glb) and {1} textures (.dds); {2} failed.\nLocalized names: {3}.",
-                glb, dds, fails, nameMap.Count);
+                "Exported {0} models (.glb) and {1} textures (.{2}); {3} failed.\nLocalized names: {4}.",
+                glb, tex, format, fails, nameMap.Count);
             Logger.Info(summary.Replace(Environment.NewLine, " "));
             return summary;
         }

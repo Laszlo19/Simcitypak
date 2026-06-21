@@ -33,6 +33,12 @@ namespace SporeMaster.RenderWare4
 
         public void Export(RW4Mesh mesh, string fileName)
         {
+            // Some RW4 mesh sections (e.g. blend-shape meshes) carry no vertex/index
+            // buffer; there's no static geometry to write.
+            if (mesh == null || mesh.vertices == null || mesh.vertices.vertices == null
+                || mesh.triangles == null || mesh.triangles.triangles == null)
+                throw new InvalidOperationException("mesh has no vertex/index buffer");
+
             var verts = mesh.vertices.vertices;
             var tris = mesh.triangles.triangles;
             int vCount = verts.Length;
@@ -127,7 +133,13 @@ namespace SporeMaster.RenderWare4
                 ["asset"] = new Dictionary<string, object> { ["version"] = "2.0", ["generator"] = "SimCityPak glTF exporter" },
                 ["scene"] = 0,
                 ["scenes"] = new object[] { new Dictionary<string, object> { ["nodes"] = new object[] { 0 } } },
-                ["nodes"] = new object[] { new Dictionary<string, object> { ["mesh"] = 0 } },
+                // Rotate -90° about X so RW4's Z-up geometry stands upright in glTF's
+                // Y-up world (otherwise models lie on their side). Quaternion [x,y,z,w].
+                ["nodes"] = new object[] { new Dictionary<string, object>
+                    {
+                        ["mesh"] = 0,
+                        ["rotation"] = new object[] { -0.70710678, 0.0, 0.0, 0.70710678 }
+                    } },
                 ["meshes"] = new object[] { new Dictionary<string, object> { ["primitives"] = new object[] { primitive } } },
                 ["buffers"] = new object[] { new Dictionary<string, object> { ["byteLength"] = bufferLength } },
                 ["bufferViews"] = bufferViews.ToArray(),
@@ -248,26 +260,44 @@ namespace SporeMaster.RenderWare4
 
         private static byte[] RgbaToPng(byte[] rgba, int w, int h)
         {
-            using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
+            using (Bitmap bmp = RgbaToBitmap(rgba, w, h))
+            using (var ms = new MemoryStream())
             {
-                var rect = new Rectangle(0, 0, w, h);
-                BitmapData bd = bmp.LockBits(rect, ImageLockMode.WriteOnly, bmp.PixelFormat);
-                byte[] bgra = new byte[w * h * 4];
-                for (int i = 0; i < w * h; i++)
-                {
-                    bgra[i * 4 + 0] = rgba[i * 4 + 2]; // B
-                    bgra[i * 4 + 1] = rgba[i * 4 + 1]; // G
-                    bgra[i * 4 + 2] = rgba[i * 4 + 0]; // R
-                    bgra[i * 4 + 3] = rgba[i * 4 + 3]; // A
-                }
-                Marshal.Copy(bgra, 0, bd.Scan0, bgra.Length);
-                bmp.UnlockBits(bd);
-                using (var ms = new MemoryStream())
-                {
-                    bmp.Save(ms, ImageFormat.Png);
-                    return ms.ToArray();
-                }
+                bmp.Save(ms, ImageFormat.Png);
+                return ms.ToArray();
             }
+        }
+
+        /// <summary>RGBA byte array -> 32bpp Bitmap. Caller disposes the bitmap.</summary>
+        public static Bitmap RgbaToBitmap(byte[] rgba, int w, int h)
+        {
+            var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+            var rect = new Rectangle(0, 0, w, h);
+            BitmapData bd = bmp.LockBits(rect, ImageLockMode.WriteOnly, bmp.PixelFormat);
+            byte[] bgra = new byte[w * h * 4];
+            for (int i = 0; i < w * h; i++)
+            {
+                bgra[i * 4 + 0] = rgba[i * 4 + 2]; // B
+                bgra[i * 4 + 1] = rgba[i * 4 + 1]; // G
+                bgra[i * 4 + 2] = rgba[i * 4 + 0]; // R
+                bgra[i * 4 + 3] = rgba[i * 4 + 3]; // A
+            }
+            Marshal.Copy(bgra, 0, bd.Scan0, bgra.Length);
+            bmp.UnlockBits(bd);
+            return bmp;
+        }
+
+        /// <summary>Decodes an RW4 DXT1/DXT5 texture to a Bitmap (level 0), or null if it
+        /// isn't a supported block-compressed texture. Caller disposes the bitmap.</summary>
+        public static Bitmap DecodeTextureToBitmap(Texture tex)
+        {
+            if (tex == null) return null;
+            if (tex.textureType != Texture.DXT1 && tex.textureType != Texture.DXT5) return null;
+            int w = tex.width, h = tex.height;
+            byte[] rgba = tex.textureType == Texture.DXT1
+                ? DecodeDxt1(tex.texData.blob, w, h)
+                : DecodeDxt5(tex.texData.blob, w, h);
+            return RgbaToBitmap(rgba, w, h);
         }
 
         private static void SetColors(ushort c0, ushort c1, byte[][] col, bool dxt1)

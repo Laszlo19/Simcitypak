@@ -18,10 +18,10 @@ Run the same `SimCityPak.exe` headlessly to mass-export assets — no GUI.
 ```
 SimCityPak.exe export-obj     <input> <outputDir>  # RW4 models   -> Wavefront .obj
 SimCityPak.exe export-gltf    <input> <outputDir>  # RW4 models   -> binary glTF 2.0 (.glb)
-SimCityPak.exe export-texture <input> <outputDir>  # RW4 textures -> .dds images
-SimCityPak.exe export-prop    <input> <outputDir>  # .prop property lists -> readable .txt
+SimCityPak.exe export-texture <input> <outputDir>  # RW4 textures -> png/jpg/tga/dds (--format)
+SimCityPak.exe export-prop    <input> <outputDir>  # .prop property lists -> readable .txt/.json
 SimCityPak.exe export-audio   <input> <outputDir>  # Wwise Vorbis audio -> playable PCM .wav
-SimCityPak.exe export-all     <input> <outputDir>  # every model -> .glb AND every texture -> .dds
+SimCityPak.exe export-all     <input> <outputDir>  # every model -> .glb AND every texture -> image
 SimCityPak.exe help                                # usage
 ```
 
@@ -52,19 +52,23 @@ through the package's property files; resources without a resolvable name keep t
   (positions + normals + texture coordinates + indices) **with the model's diffuse texture**
   baked in: it picks the largest DXT1/DXT5 texture that isn't a normal map, decodes it to PNG,
   and applies it as the material base color — so models show textured in Blender, Windows 3D
-  Viewer, three.js, Unity, Unreal, etc. (Models whose only textures are raw bitmaps (type 21)
-  export untextured. Normal/spec maps, skeleton and animation are not written yet.)
-- **`export-texture`** writes each model's embedded textures as `.dds` images
-  (`<name>[_texN].dds`). Block-compressed (DXT1/DXT5) textures are supported; raw-bitmap
-  textures (`textureType 21`) are skipped. Open in any DDS viewer, or convert with
-  `ffmpeg -i tex.dds tex.png`.
+  Viewer, three.js, Unity, Unreal, etc. Models are rotated upright (RW4 is Z-up, glTF is Y-up)
+  so they stand on their base. (Models whose only textures are raw bitmaps (type 21) export
+  untextured. Normal/spec maps, skeleton and animation are not written yet.)
+- **`export-texture`** writes each model's embedded textures as image files
+  (`<name>[_texN].<ext>`). **`--format png|jpg|tga|dds`** (default **png**): block-compressed
+  DXT1/DXT5 textures are decoded to a real image (png/jpg/tga) or written as raw `.dds`;
+  raw-bitmap (`textureType 21`) textures are skipped.
 - **`export-prop`** dumps **property-list (`.prop`) resources** (type `0x00b1b104`) — one
   building per file, named by its localized name (with `--locale`). **Property names are
   resolved** where SimCityPak knows them (e.g. `Menu Item Title`, `Menu Item Description`,
   `LOD1`, `Is Module`), falling back to `0x<hash>` for undocumented ones — so a building's
   display name, description, menu placement, model/LOD refs and tuning come out readable.
   Output is `.txt` by default or **`.json`** with `--json`. Handles every property type (Float,
-  Bool, Key/TGI, Vector2/3/4, Color, BoundingBox, Transform, String8/16, arrays, …).
+  Bool, Key/TGI, Vector2/3/4, Color, BoundingBox, Transform, String8/16, arrays, …). Numbers use
+  invariant culture (always `.` decimals) so Transform/vector values aren't ambiguous on
+  comma-decimal locales. The **GUI** has the same export under right-click ▸ **Export Properties
+  (TXT/JSON)…** on any property resource.
 - **`export-audio`** decodes SimCity's Audiokinetic **Wwise Vorbis** audio (RIFF with
   codec `0xFFFF`, which normal players reject) into standard PCM `.wav`. It uses
   **[vgmstream](https://github.com/vgmstream/vgmstream)**, bundled in `Tools\vgmstream\`
