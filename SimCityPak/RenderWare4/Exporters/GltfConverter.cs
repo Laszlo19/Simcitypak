@@ -194,24 +194,56 @@ namespace SporeMaster.RenderWare4
             try
             {
                 if (mesh.model == null) return null;
-                Texture tex = null;
+
+                // Collect this model's block-compressed textures, largest first.
+                // (SimCity RW4 models are single-mesh; RW4Mesh carries no material
+                // link, and the MeshMaterialAssignment chain is disabled in the
+                // parser, so we choose the diffuse heuristically.)
+                var candidates = new List<Texture>();
                 foreach (RW4Section s in mesh.model.Sections)
                 {
                     if (s.TypeCode == SectionTypeCodes.Texture && s.obj is Texture)
                     {
                         Texture t = (Texture)s.obj;
-                        if (t.textureType == Texture.DXT1 || t.textureType == Texture.DXT5) { tex = t; break; }
+                        if (t.textureType == Texture.DXT1 || t.textureType == Texture.DXT5)
+                            candidates.Add(t);
                     }
                 }
-                if (tex == null) return null;
+                if (candidates.Count == 0) return null;
+                candidates.Sort((a, b) => ((long)b.width * b.height).CompareTo((long)a.width * a.height));
 
-                int w = tex.width, h = tex.height;
-                byte[] rgba = tex.textureType == Texture.DXT1
-                    ? DecodeDxt1(tex.texData.blob, w, h)
-                    : DecodeDxt5(tex.texData.blob, w, h);
-                return RgbaToPng(rgba, w, h);
+                // Prefer the largest texture that is NOT a normal map; decode lazily.
+                byte[] firstRgba = null; int fw = 0, fh = 0;
+                foreach (Texture t in candidates)
+                {
+                    int w = t.width, h = t.height;
+                    byte[] rgba = t.textureType == Texture.DXT1
+                        ? DecodeDxt1(t.texData.blob, w, h)
+                        : DecodeDxt5(t.texData.blob, w, h);
+                    if (firstRgba == null) { firstRgba = rgba; fw = w; fh = h; }
+                    if (!LooksLikeNormalMap(rgba))
+                        return RgbaToPng(rgba, w, h);
+                }
+                // Everything looked like a normal map: fall back to the largest.
+                return RgbaToPng(firstRgba, fw, fh);
             }
             catch { return null; }
+        }
+
+        /// <summary>
+        /// Cheap heuristic: tangent-space normal maps are blue-dominant with R,G
+        /// clustered around mid-grey. Used to avoid picking a normal map as the
+        /// base color when a model has several textures.
+        /// </summary>
+        private static bool LooksLikeNormalMap(byte[] rgba)
+        {
+            int n = rgba.Length / 4;
+            if (n == 0) return false;
+            long r = 0, g = 0, b = 0;
+            for (int i = 0; i < n; i++) { r += rgba[i * 4]; g += rgba[i * 4 + 1]; b += rgba[i * 4 + 2]; }
+            double ar = (double)r / n, ag = (double)g / n, ab = (double)b / n;
+            return ab > 180 && ar > 90 && ar < 165 && ag > 90 && ag < 165
+                   && ab > ar + 40 && ab > ag + 40;
         }
 
         private static byte[] RgbaToPng(byte[] rgba, int w, int h)

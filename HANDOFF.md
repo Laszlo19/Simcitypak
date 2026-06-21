@@ -80,15 +80,23 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
 - **Implemented commands** (input = `.package` | folder | single file for all):
   - `export-obj <input> <outputDir>` — RW4 models → Wavefront .obj. Tested 4/5 (1 texture-only skip).
   - `export-gltf <input> <outputDir>` — RW4 models → binary glTF 2.0 .glb (geometry: positions,
-    normals, UVs, indices) PLUS the model's primary embedded texture as the material base color.
+    normals, UVs, indices) PLUS the model's diffuse texture as the material base color.
     Pure-C# GLB writer in `RenderWare4\Exporters\GltfConverter.cs` (Newtonsoft.Json for the JSON
-    chunk). Textures: it finds the first DXT1/DXT5 Texture section on `mesh.model`, decodes it with
-    a built-in DXT decoder (`DecodeDxt1`/`DecodeDxt5`) to RGBA, encodes PNG via System.Drawing, and
-    embeds it (glTF only allows PNG/JPEG, not DDS). Validated: imports in Blender 4.3 with a 512x256
-    textured material; extracted PNG is a real (non-uniform) image. Two model commands share
+    chunk). Textures: of the model's DXT1/DXT5 Texture sections it picks the **largest that isn't
+    a normal map** (`LooksLikeNormalMap` = blue-dominant heuristic), decodes with a built-in DXT
+    decoder (`DecodeDxt1`/`DecodeDxt5`) to RGBA, encodes PNG via System.Drawing, embeds it (glTF
+    allows only PNG/JPEG, not DDS). Validated: imports in Blender 4.3 textured; selected texture
+    avgRGB is a natural diffuse colour, not (128,128,255). Two model commands share
     `RunExportModels(args, ext, exporter)` in CliRunner.
-    TODO on the .glb: raw-bitmap (type 21) textures, per-mesh material mapping (RW4Mesh has no
-    material link; we use the model's first texture), normal/spec maps, skeleton, animation.
+
+    **Per-mesh textures investigation (done):** all 563 models are SINGLE-mesh (verified by
+    exporting all and finding zero `_mesh1` files), so per-mesh == per-model here. The
+    authoritative chain Mesh -> `RWMeshMaterialAssignment`(0x2001a) -> `RW4TexMetadata`(0x2000b)
+    -> Texture EXISTS in the format but is NOT usable: `RW4Model.Read` leaves 0x2001a parsing
+    commented out, and 0x2000b is parsed as `RW4Material` while the assignment wants
+    `RW4TexMetadata` — `RW4Section.GetObject` caches one obj per section so the cast throws
+    (that's why it's disabled). Enabling it needs real parser surgery; hence the heuristic.
+    TODO on the .glb: raw-bitmap (type 21) textures, normal/spec maps, skeleton, animation.
   - `export-texture <input> <outputDir>` — RW4 Texture sections (type 0x20003) → .dds files.
     Added `Texture.SaveDds(path)` in `RenderWare4\Texture.cs` — writes the DDS magic+header
     (same header ToImage() builds) + the raw block-compressed blob, WITHOUT the GraphicsDevice
