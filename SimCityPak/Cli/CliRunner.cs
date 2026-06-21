@@ -621,19 +621,34 @@ namespace SimCityPak.Cli
         }
 
         /// <summary>
-        /// --combine: groups a package's prop resources into assets (props sharing an
-        /// InstanceId belong together; a catalog prop's "Model Details" reference is unioned
-        /// with the instance it points to) and writes ONE file per asset, merging the model,
-        /// gameplay and catalog props. Named by the asset's localized name when known.
+        /// CLI wrapper for --combine: loads the package and delegates to
+        /// <see cref="ExportCombinedPropsToFolder"/>, printing the summary.
         /// </summary>
         private static int RunExportPropCombined(string input, string outDir, string localeFile, bool json)
         {
             DatabasePackedFile package = DatabasePackedFile.LoadFromFile(input);
-            var nameMap = BuildLocaleNameMap(package.Indices, localeFile);
-            if (nameMap.Count > 0) Console.WriteLine("(using " + nameMap.Count + " localized names from the locale file)");
+            string summary = ExportCombinedPropsToFolder(package.Indices, outDir, localeFile, json);
+            Console.WriteLine();
+            Console.WriteLine(summary);
+            Console.WriteLine("Output: " + Path.GetFullPath(outDir));
+            return 0;
+        }
+
+        /// <summary>
+        /// --combine core: groups prop resources into assets (props sharing an InstanceId belong
+        /// together; a catalog prop's "Model Details" reference is unioned with the instance it
+        /// points to) and writes ONE file per asset, merging the model, gameplay and catalog
+        /// props. Named by the asset's localized name when known. Public so the GUI reuses it.
+        /// Returns a human-readable summary.
+        /// </summary>
+        public static string ExportCombinedPropsToFolder(IEnumerable<DatabaseIndex> indices, string outDir, string localeFile, bool json)
+        {
+            Directory.CreateDirectory(outDir);
+            Logger.Info("Export combined props -> " + outDir + (string.IsNullOrEmpty(localeFile) ? "" : " (locale: " + localeFile + ")"));
+            var nameMap = BuildLocaleNameMap(indices, localeFile);
 
             var props = new List<KeyValuePair<DatabaseIndex, PropertyFile>>();
-            foreach (DatabaseIndex index in package.Indices)
+            foreach (DatabaseIndex index in indices)
             {
                 if (index.TypeId != PROP_TYPE_ID) continue;
                 try { props.Add(new KeyValuePair<DatabaseIndex, PropertyFile>(index, new PropertyFile(index))); }
@@ -696,15 +711,16 @@ namespace SimCityPak.Cli
                     var members = new List<KeyValuePair<DatabaseIndex, PropertyFile>>();
                     foreach (int i in g) members.Add(props[i]);
                     DumpCombined(members, outPath, name ?? baseName, json);
-                    ok++; Console.WriteLine("OK   " + Path.GetFileName(outPath) + "  (" + g.Count + " props)");
+                    ok++; Logger.Info("combine OK " + Path.GetFileName(outPath) + " (" + g.Count + " props)");
                 }
-                catch (Exception ex) { fails++; Logger.Exception("combine dump " + baseName, ex); Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
+                catch (Exception ex) { fails++; Logger.Exception("combine dump " + baseName, ex); }
             }
 
-            Console.WriteLine();
-            Console.WriteLine(string.Format("Done. assets={0} (from {1} props) failed={2}", ok, n, fails));
-            Console.WriteLine("Output: " + Path.GetFullPath(outDir));
-            return fails > 0 ? 1 : 0;
+            string summary = string.Format(
+                "Combined {0} props into {1} asset files ({2} failed).\nLocalized names: {3}.",
+                n, ok, fails, nameMap.Count);
+            Logger.Info(summary.Replace(Environment.NewLine, " "));
+            return summary;
         }
 
         private static string UniqueName(string name, string fallback, HashSet<string> used)

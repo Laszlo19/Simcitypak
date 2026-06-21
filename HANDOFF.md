@@ -167,8 +167,13 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     Details union both confirmed; (2) `SimCity_DLC0.package` + en-us locale → 554 assets from
     643 props, 0 failures, localized names ("Maxis Manor", "Eiffel Tower", "Baccarat Room", …),
     including 2-prop assets joined across *different* instances via the Model Details reference.
-    Possible enhancement: also wire a GUI "Export combined…" action; and Model Details may have
-    sibling/variant hashes for some asset types (only `0x0975695f` handled so far).
+    **GUI (done):** the combine core is now `public CliRunner.ExportCombinedPropsToFolder(
+    IEnumerable<DatabaseIndex>, outDir, localeFile, json)` (CLI `RunExportPropCombined` is a thin
+    wrapper that loads the package and prints the returned summary). The GUI menu *File ▸ Export
+    combined properties to folder…* (`MainWindow.mnuExportCombinedProps_Click`) asks JSON/TXT,
+    picks a folder, and runs it on a Task with a wait cursor — same pattern as *Export all*.
+    Possible enhancement: Model Details may have sibling/variant hashes for some asset types
+    (only `0x0975695f` handled so far).
 
 - **Localized export names (done):** for `.package` input, `export-obj/gltf/texture/prop` name
   files by **localized asset name** instead of TGI hashes. Add `--locale <Locale\xx-xx\Data.package>`
