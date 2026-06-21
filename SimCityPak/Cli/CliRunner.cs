@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Gibbed.Spore.Package;
 using Gibbed.Spore.Properties;
+using Newtonsoft.Json;
 using SporeMaster.RenderWare4;
 
 namespace SimCityPak.Cli
@@ -116,7 +117,8 @@ namespace SimCityPak.Cli
             Console.WriteLine("  export-obj     : RW4 models   -> Wavefront .obj  (<name>[_meshN].obj)");
             Console.WriteLine("  export-gltf    : RW4 models   -> binary glTF .glb (<name>[_meshN].glb)");
             Console.WriteLine("  export-texture : RW4 textures -> .dds images     (<name>[_texN].dds)");
-            Console.WriteLine("  export-prop    : .prop property lists -> readable .txt dump");
+            Console.WriteLine("  export-prop    : .prop property lists -> readable .txt (or .json with --json),");
+            Console.WriteLine("                   property names resolved where SimCityPak knows them");
             Console.WriteLine("  export-audio   : Wwise Vorbis audio -> PCM .wav (via bundled vgmstream)");
             Console.WriteLine("  export-all     : every model -> .glb AND every texture -> .dds, one folder");
             Console.WriteLine();
@@ -442,13 +444,15 @@ namespace SimCityPak.Cli
         {
             if (args.Length < 3)
             {
-                Console.WriteLine("Usage: SimCityPak.exe export-prop <input> <outputDir>");
+                Console.WriteLine("Usage: SimCityPak.exe export-prop <input> <outputDir> [--json] [--locale <pkg>]");
                 return 2;
             }
             string input = args[1];
             string outDir = args[2];
             Directory.CreateDirectory(outDir);
 
+            bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+            string ext = json ? ".json" : ".txt";
             int ok = 0, fails = 0;
 
             if (Directory.Exists(input))
@@ -460,8 +464,8 @@ namespace SimCityPak.Cli
                     {
                         var pf = new PropertyFile();
                         using (var ms = new MemoryStream(File.ReadAllBytes(file))) pf.Read(ms);
-                        DumpProp(pf, Path.Combine(outDir, baseName + ".txt"), baseName);
-                        ok++; Console.WriteLine("OK   " + baseName + ".txt");
+                        DumpProp(pf, Path.Combine(outDir, baseName + ext), baseName, json);
+                        ok++; Console.WriteLine("OK   " + baseName + ext);
                     }
                     catch (Exception ex) { fails++; Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
                 }
@@ -481,8 +485,8 @@ namespace SimCityPak.Cli
                     try
                     {
                         var pf = new PropertyFile(index);
-                        DumpProp(pf, Path.Combine(outDir, baseName + ".txt"), baseName);
-                        ok++; Console.WriteLine("OK   " + baseName + ".txt");
+                        DumpProp(pf, Path.Combine(outDir, baseName + ext), baseName, json);
+                        ok++; Console.WriteLine("OK   " + baseName + ext);
                     }
                     catch (Exception ex) { fails++; Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
                 }
@@ -494,8 +498,8 @@ namespace SimCityPak.Cli
                 {
                     var pf = new PropertyFile();
                     using (var ms = new MemoryStream(File.ReadAllBytes(input))) pf.Read(ms);
-                    DumpProp(pf, Path.Combine(outDir, baseName + ".txt"), baseName);
-                    ok++; Console.WriteLine("OK   " + baseName + ".txt");
+                    DumpProp(pf, Path.Combine(outDir, baseName + ext), baseName, json);
+                    ok++; Console.WriteLine("OK   " + baseName + ext);
                 }
                 catch (Exception ex) { fails++; Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
             }
@@ -511,27 +515,80 @@ namespace SimCityPak.Cli
             return fails > 0 ? 1 : 0;
         }
 
-        /// <summary>Writes a property file's values to a readable text dump (sorted by hash).</summary>
-        private static void DumpProp(PropertyFile pf, string outPath, string name)
+        /// <summary>Readable name of a property hash from SimCityPak's descriptor DB
+        /// (database_main.s3db), or null if unknown.</summary>
+        private static string PropName(uint hash)
         {
+            try
+            {
+                TGIRecord rec;
+                if (TGIRegistry.Instance.Properties.Cache.TryGetValue(hash, out rec))
+                {
+                    if (!string.IsNullOrEmpty(rec.Comments)) return rec.Comments;
+                    if (!string.IsNullOrEmpty(rec.DisplayName)) return rec.DisplayName;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static string PropTypeName(Property p)
+        {
+            if (p == null) return "null";
+            string t = p.GetType().Name;
+            return t.EndsWith("Property") ? t.Substring(0, t.Length - 8) : t;
+        }
+
+        private static string PropValue(Property p)
+        {
+            try { return p == null ? "" : p.DisplayValue; }
+            catch (Exception ex) { return "<error: " + ex.Message + ">"; }
+        }
+
+        /// <summary>Writes a property file as readable text or JSON, resolving property
+        /// names where SimCityPak knows them. Sorted by hash.</summary>
+        private static void DumpProp(PropertyFile pf, string outPath, string name, bool json)
+        {
+            var keys = new List<uint>(pf.Values.Keys);
+            keys.Sort();
+
+            if (json)
+            {
+                var props = new List<object>();
+                foreach (uint hash in keys)
+                {
+                    Property p = pf.Values[hash];
+                    props.Add(new Dictionary<string, object>
+                    {
+                        ["name"] = PropName(hash),                       // null when unknown
+                        ["hash"] = "0x" + hash.ToString("x8"),
+                        ["type"] = PropTypeName(p),
+                        ["value"] = PropValue(p)
+                    });
+                }
+                var root = new Dictionary<string, object>
+                {
+                    ["name"] = name,
+                    ["propertyCount"] = pf.Values.Count,
+                    ["properties"] = props
+                };
+                File.WriteAllText(outPath, JsonConvert.SerializeObject(root, Formatting.Indented));
+                return;
+            }
+
             var sb = new StringBuilder();
             sb.AppendLine("# SimCityPak property dump: " + name);
             sb.AppendLine("# properties: " + pf.Values.Count);
             sb.AppendLine();
-
-            var keys = new List<uint>(pf.Values.Keys);
-            keys.Sort();
             foreach (uint hash in keys)
             {
                 Property p = pf.Values[hash];
-                string typeName = p == null ? "null" : p.GetType().Name;
-                if (typeName.EndsWith("Property")) typeName = typeName.Substring(0, typeName.Length - 8);
-                string value;
-                try { value = p == null ? "" : p.DisplayValue; }
-                catch (Exception ex) { value = "<error: " + ex.Message + ">"; }
-                sb.AppendFormat("0x{0:x8}  {1,-14} = {2}\r\n", hash, typeName, value);
+                string pname = PropName(hash);
+                string label = pname != null
+                    ? string.Format("{0} [0x{1:x8}]", pname, hash)
+                    : string.Format("0x{0:x8}", hash);
+                sb.AppendFormat("{0,-44} {1,-12} = {2}\r\n", label, PropTypeName(p), PropValue(p));
             }
-
             File.WriteAllText(outPath, sb.ToString());
         }
 

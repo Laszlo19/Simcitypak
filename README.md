@@ -58,10 +58,13 @@ through the package's property files; resources without a resolvable name keep t
   (`<name>[_texN].dds`). Block-compressed (DXT1/DXT5) textures are supported; raw-bitmap
   textures (`textureType 21`) are skipped. Open in any DDS viewer, or convert with
   `ffmpeg -i tex.dds tex.png`.
-- **`export-prop`** dumps **property-list (`.prop`) resources** (type `0x00b1b104`) to a
-  readable `.txt` — one line per property: `0x<hash>  <Type>  = <value>`, sorted by hash.
-  Handles all property types (Float, Bool, Key/TGI, Vector2/3/4, Color, BoundingBox,
-  Transform, String8/16, arrays, …). Useful for inspecting building/gameplay tuning.
+- **`export-prop`** dumps **property-list (`.prop`) resources** (type `0x00b1b104`) — one
+  building per file, named by its localized name (with `--locale`). **Property names are
+  resolved** where SimCityPak knows them (e.g. `Menu Item Title`, `Menu Item Description`,
+  `LOD1`, `Is Module`), falling back to `0x<hash>` for undocumented ones — so a building's
+  display name, description, menu placement, model/LOD refs and tuning come out readable.
+  Output is `.txt` by default or **`.json`** with `--json`. Handles every property type (Float,
+  Bool, Key/TGI, Vector2/3/4, Color, BoundingBox, Transform, String8/16, arrays, …).
 - **`export-audio`** decodes SimCity's Audiokinetic **Wwise Vorbis** audio (RIFF with
   codec `0xFFFF`, which normal players reject) into standard PCM `.wav`. It uses
   **[vgmstream](https://github.com/vgmstream/vgmstream)**, bundled in `Tools\vgmstream\`

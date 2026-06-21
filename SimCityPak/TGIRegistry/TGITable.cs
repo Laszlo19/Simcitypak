@@ -85,18 +85,31 @@ namespace SimCityPak
             reader.Dispose();
         }
 
+        /// <summary>Resolves a database file name against the current dir, then the
+        /// app's install dir, so registries load even when the working directory is
+        /// not the exe folder (e.g. the CLI launched from elsewhere). Null if missing.</summary>
+        private static string ResolveDbPath(string db)
+        {
+            if (string.IsNullOrEmpty(db)) return null;
+            if (File.Exists(db)) return db;
+            string exeRelative = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, db);
+            return File.Exists(exeRelative) ? exeRelative : null;
+        }
+
         public void LoadCache()
         {
-            if (_dbMain != "" && File.Exists(_dbMain))
+            string mainDb = ResolveDbPath(_dbMain);
+            if (mainDb != null)
             {
-                _dbMainConn = new SQLiteConnection(String.Format("Data Source={0}", _dbMain));
+                _dbMainConn = new SQLiteConnection(String.Format("Data Source={0}", mainDb));
                 _dbMainConn.Open();
                 _LoadFromDatabase(_dbMainConn);
             }
 
-            if (_dbUser != "" && File.Exists(_dbUser))
+            string userDb = ResolveDbPath(_dbUser);
+            if (userDb != null)
             {
-                _dbUserConn = new SQLiteConnection(String.Format("Data Source={0}", _dbUser));
+                _dbUserConn = new SQLiteConnection(String.Format("Data Source={0}", userDb));
                 _dbUserConn.Open();
                 _LoadFromDatabase(_dbUserConn);
             }

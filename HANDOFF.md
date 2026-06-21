@@ -116,7 +116,15 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     94 props each, correct Float/Bool/Key/Vector2/BoundingBox/Transform/array values.
     Polish TODO: `DisplayValue` uses CurrentCulture so decimals are locale-formatted (commas on
     a HU machine), which makes Transform/array values ambiguous; an invariant-culture dump mode
-    would be cleaner. FNV key hashes are printed as hex (no name lookup yet).
+    would be cleaner.
+    **Property names + JSON (done):** `DumpProp` resolves property hashes to readable names via
+    `TGIRegistry.Instance.Properties.Cache` (`PropName`) — e.g. `Menu Item Title`, `Menu Item
+    Description`, `LOD1` — falling back to hex for undocumented ones; `--json` writes `.json`.
+    IMPORTANT FIX that enabled this: `TGITable.LoadCache` opened `database_main.s3db` by a
+    *relative* path, so registries were empty unless the working dir was the exe folder (broke the
+    CLI from elsewhere). Added `ResolveDbPath` (falls back to `AppDomain.BaseDirectory`) — also
+    fixes the GUI launched from another directory. Verified end-to-end on DLC0 + en-us locale:
+    "Airship Hangar.json" with Menu Item Title/Description etc. resolved.
 
 - **Localized export names (done):** for `.package` input, `export-obj/gltf/texture/prop` name
   files by **localized asset name** instead of TGI hashes. Add `--locale <Locale\xx-xx\Data.package>`
