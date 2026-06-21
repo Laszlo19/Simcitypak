@@ -34,6 +34,10 @@ namespace SimCityPak.Cli
         // SimCity 2013 type id for a property list (.prop) resource.
         private const uint PROP_TYPE_ID = 0x00b1b104;
 
+        // "Model Details (PROP)" property: a catalog prop's Key reference to the
+        // model/gameplay asset instance it belongs to. Used by --combine.
+        private const uint MODEL_DETAILS_HASH = 0x0975695f;
+
         [DllImport("kernel32.dll")]
         private static extern bool AttachConsole(int dwProcessId);
         private const int ATTACH_PARENT_PROCESS = -1;
@@ -118,7 +122,8 @@ namespace SimCityPak.Cli
             Console.WriteLine("  export-gltf    : RW4 models   -> binary glTF .glb (<name>[_meshN].glb)");
             Console.WriteLine("  export-texture : RW4 textures -> images (--format png|jpg|tga|dds, default png)");
             Console.WriteLine("  export-prop    : .prop property lists -> readable .txt (or .json with --json),");
-            Console.WriteLine("                   property names resolved where SimCityPak knows them");
+            Console.WriteLine("                   property names resolved; --combine merges an asset's model +");
+            Console.WriteLine("                   gameplay + catalog props into one file (package input)");
             Console.WriteLine("  export-audio   : Wwise Vorbis audio -> PCM .wav (via bundled vgmstream)");
             Console.WriteLine("  export-all     : every model -> .glb AND every texture -> image, one folder");
             Console.WriteLine();
@@ -514,6 +519,15 @@ namespace SimCityPak.Cli
 
             bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
             string ext = json ? ".json" : ".txt";
+
+            // --combine: one file per asset, merging the model + gameplay + catalog
+            // props that belong together (package input only).
+            if (args.Any(a => a.Equals("--combine", StringComparison.OrdinalIgnoreCase))
+                && input.EndsWith(".package", StringComparison.OrdinalIgnoreCase))
+            {
+                return RunExportPropCombined(input, outDir, GetLocaleFile(args), json);
+            }
+
             int ok = 0, fails = 0;
 
             if (Directory.Exists(input))
@@ -604,6 +618,167 @@ namespace SimCityPak.Cli
         {
             try { return p == null ? "" : p.DisplayValue; }
             catch (Exception ex) { return "<error: " + ex.Message + ">"; }
+        }
+
+        /// <summary>
+        /// --combine: groups a package's prop resources into assets (props sharing an
+        /// InstanceId belong together; a catalog prop's "Model Details" reference is unioned
+        /// with the instance it points to) and writes ONE file per asset, merging the model,
+        /// gameplay and catalog props. Named by the asset's localized name when known.
+        /// </summary>
+        private static int RunExportPropCombined(string input, string outDir, string localeFile, bool json)
+        {
+            DatabasePackedFile package = DatabasePackedFile.LoadFromFile(input);
+            var nameMap = BuildLocaleNameMap(package.Indices, localeFile);
+            if (nameMap.Count > 0) Console.WriteLine("(using " + nameMap.Count + " localized names from the locale file)");
+
+            var props = new List<KeyValuePair<DatabaseIndex, PropertyFile>>();
+            foreach (DatabaseIndex index in package.Indices)
+            {
+                if (index.TypeId != PROP_TYPE_ID) continue;
+                try { props.Add(new KeyValuePair<DatabaseIndex, PropertyFile>(index, new PropertyFile(index))); }
+                catch (Exception ex) { Logger.Exception("combine read prop", ex); }
+            }
+            int n = props.Count;
+
+            // Union-Find over the props.
+            int[] parent = new int[n];
+            for (int i = 0; i < n; i++) parent[i] = i;
+            Func<int, int> find = null;
+            find = x => { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+            Action<int, int> union = (a, b) => { int ra = find(a), rb = find(b); if (ra != rb) parent[ra] = rb; };
+
+            var firstByInstance = new Dictionary<uint, int>();
+            for (int i = 0; i < n; i++)
+            {
+                uint inst = props[i].Key.InstanceId;
+                int other;
+                if (firstByInstance.TryGetValue(inst, out other)) union(i, other);  // same asset instance
+                else firstByInstance[inst] = i;
+            }
+            for (int i = 0; i < n; i++)
+            {
+                Property md;
+                if (props[i].Value.Values.TryGetValue(MODEL_DETAILS_HASH, out md))
+                {
+                    KeyProperty kp = md as KeyProperty;
+                    int target;
+                    if (kp != null && firstByInstance.TryGetValue(kp.InstanceId, out target)) union(i, target);
+                }
+            }
+
+            var groups = new Dictionary<int, List<int>>();
+            for (int i = 0; i < n; i++)
+            {
+                int r = find(i);
+                List<int> g;
+                if (!groups.TryGetValue(r, out g)) { g = new List<int>(); groups[r] = g; }
+                g.Add(i);
+            }
+
+            var used = new HashSet<string>();
+            int ok = 0, fails = 0;
+            foreach (var g in groups.Values)
+            {
+                // sort facets by group container for stable output
+                g.Sort((a, b) => props[a].Key.GroupContainer.CompareTo(props[b].Key.GroupContainer));
+                string name = null;
+                uint assetInst = props[g[0]].Key.InstanceId;
+                foreach (int i in g)
+                {
+                    string nm;
+                    if (nameMap.TryGetValue(props[i].Key.InstanceId, out nm)) { name = nm; break; }
+                }
+                string baseName = UniqueName(name, string.Format("{0:x8}", assetInst), used);
+                string outPath = Path.Combine(outDir, baseName + (json ? ".json" : ".txt"));
+                try
+                {
+                    var members = new List<KeyValuePair<DatabaseIndex, PropertyFile>>();
+                    foreach (int i in g) members.Add(props[i]);
+                    DumpCombined(members, outPath, name ?? baseName, json);
+                    ok++; Console.WriteLine("OK   " + Path.GetFileName(outPath) + "  (" + g.Count + " props)");
+                }
+                catch (Exception ex) { fails++; Logger.Exception("combine dump " + baseName, ex); Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
+            }
+
+            Console.WriteLine();
+            Console.WriteLine(string.Format("Done. assets={0} (from {1} props) failed={2}", ok, n, fails));
+            Console.WriteLine("Output: " + Path.GetFullPath(outDir));
+            return fails > 0 ? 1 : 0;
+        }
+
+        private static string UniqueName(string name, string fallback, HashSet<string> used)
+        {
+            string baseName = Sanitize(string.IsNullOrEmpty(name) ? fallback : name);
+            string candidate = baseName;
+            int k = 2;
+            while (used.Contains(candidate.ToLowerInvariant())) candidate = baseName + "_" + (k++);
+            used.Add(candidate.ToLowerInvariant());
+            return candidate;
+        }
+
+        /// <summary>Writes several property files into one combined dump (one section per
+        /// resource), with resolved names and invariant-culture numbers.</summary>
+        private static void DumpCombined(List<KeyValuePair<DatabaseIndex, PropertyFile>> members,
+            string outPath, string name, bool json)
+        {
+            var prev = System.Threading.Thread.CurrentThread.CurrentCulture;
+            System.Threading.Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+            try
+            {
+                if (json)
+                {
+                    var resources = new List<object>();
+                    foreach (var m in members)
+                    {
+                        var keys = new List<uint>(m.Value.Values.Keys); keys.Sort();
+                        var pl = new List<object>();
+                        foreach (uint hash in keys)
+                        {
+                            Property p = m.Value.Values[hash];
+                            pl.Add(new Dictionary<string, object>
+                            {
+                                ["name"] = PropName(hash),
+                                ["hash"] = "0x" + hash.ToString("x8"),
+                                ["type"] = PropTypeName(p),
+                                ["value"] = PropValue(p)
+                            });
+                        }
+                        resources.Add(new Dictionary<string, object>
+                        {
+                            ["type"] = "0x" + m.Key.TypeId.ToString("x8"),
+                            ["group"] = "0x" + m.Key.GroupContainer.ToString("x8"),
+                            ["instance"] = "0x" + m.Key.InstanceId.ToString("x8"),
+                            ["propertyCount"] = m.Value.Values.Count,
+                            ["properties"] = pl
+                        });
+                    }
+                    var root = new Dictionary<string, object> { ["name"] = name, ["resourceCount"] = members.Count, ["resources"] = resources };
+                    File.WriteAllText(outPath, JsonConvert.SerializeObject(root, Formatting.Indented));
+                    return;
+                }
+
+                var sb = new StringBuilder();
+                sb.AppendLine("# SimCityPak combined property dump: " + name);
+                sb.AppendLine("# resources: " + members.Count);
+                sb.AppendLine();
+                foreach (var m in members)
+                {
+                    sb.AppendFormat("== T:0x{0:x8} G:0x{1:x8} I:0x{2:x8}  ({3} properties) ==\r\n",
+                        m.Key.TypeId, m.Key.GroupContainer, m.Key.InstanceId, m.Value.Values.Count);
+                    var keys = new List<uint>(m.Value.Values.Keys); keys.Sort();
+                    foreach (uint hash in keys)
+                    {
+                        Property p = m.Value.Values[hash];
+                        string pname = PropName(hash);
+                        string label = pname != null ? string.Format("{0} [0x{1:x8}]", pname, hash) : string.Format("0x{0:x8}", hash);
+                        sb.AppendFormat("{0,-44} {1,-12} = {2}\r\n", label, PropTypeName(p), PropValue(p));
+                    }
+                    sb.AppendLine();
+                }
+                File.WriteAllText(outPath, sb.ToString());
+            }
+            finally { System.Threading.Thread.CurrentThread.CurrentCulture = prev; }
         }
 
         /// <summary>Writes a property file as readable text or JSON, resolving property

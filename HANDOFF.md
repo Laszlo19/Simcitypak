@@ -142,6 +142,34 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     kPropWaterConsumer_*) already resolve via the descriptor DB — they live in the building's
     GAMEPLAY prop, not the model prop.
 
+  - **`export-prop --combine` (done):** when exporting from a `.package`, merge each asset's
+    separate prop resources into ONE file. An asset's props relate like this (verified on
+    `Oppie_OFFLINE_CentralTrainStation.package`): the **model** prop (`G 40e1c000`) and the
+    **gameplay** prop (`G 40e0c000`, has Power Consumer/Workers) SHARE an InstanceId
+    (`0x998ef8f7`); a separate **catalog/menu** prop (`G 09878a01`, has Menu Item Title/Desc)
+    points to that instance via the **"Model Details (PROP)" property, hash `0x0975695f`** (a
+    KeyProperty whose InstanceId = the asset instance).
+    Implementation in `Cli\CliRunner.cs`:
+      * const `MODEL_DETAILS_HASH = 0x0975695f`.
+      * `RunExportProp` dispatches to `RunExportPropCombined(...)` when args contain `--combine`
+        AND input is a `.package`.
+      * `RunExportPropCombined`: loads all prop resources, builds a **union-find** — unions props
+        that share an InstanceId, and unions a prop having Model Details with the prop(s) of the
+        instance it references. Each connected component = one asset. Names it from the locale
+        name map (any member instance that resolves), else the asset instance hash; `UniqueName`
+        dedupes. Writes one file per asset via `DumpCombined`.
+      * `DumpCombined(members, outPath, name, json)`: writes all member props into one file
+        (one `== T:.. G:.. I:.. ==` section each for txt; a `resources[]` array for json),
+        reusing `PropName`/`PropTypeName`/`PropValue` + invariant culture.
+      * help text updated.
+    Tested end-to-end: (1) `Oppie_OFFLINE_CentralTrainStation.package` → ONE file merging the
+    model + gameplay + catalog props (3 resources, 94+137+17 props), instance-share + Model
+    Details union both confirmed; (2) `SimCity_DLC0.package` + en-us locale → 554 assets from
+    643 props, 0 failures, localized names ("Maxis Manor", "Eiffel Tower", "Baccarat Room", …),
+    including 2-prop assets joined across *different* instances via the Model Details reference.
+    Possible enhancement: also wire a GUI "Export combined…" action; and Model Details may have
+    sibling/variant hashes for some asset types (only `0x0975695f` handled so far).
+
 - **Localized export names (done):** for `.package` input, `export-obj/gltf/texture/prop` name
   files by **localized asset name** instead of TGI hashes. Add `--locale <Locale\xx-xx\Data.package>`
   or set it in the GUI Settings (`Properties.Settings.Default.LocaleFile`). Implementation in
