@@ -9,9 +9,11 @@
   vgmstream tools, the .s3db databases, etc.) into "Program Files\SimCityPak".
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <!-- Version is supplied at build time: wix build -d Version=1.0.0.0 -->
+  <?ifndef Version ?><?define Version = "1.0.0.0" ?><?endif?>
   <Package Name="SimCityPak"
            Manufacturer="SimCityPak community fork"
-           Version="1.0.0.0"
+           Version="$(Version)"
            UpgradeCode="CE8D766B-06F8-44E0-B9CB-0AFA5610423E"
            Scope="perMachine">
 

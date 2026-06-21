@@ -4,7 +4,7 @@
 #
 # Usage:  .\build-msi.ps1            (uses an existing Release build)
 #         .\build-msi.ps1 -Rebuild   (rebuilds the app first)
-param([switch]$Rebuild)
+param([switch]$Rebuild, [string]$Version = '1.0.0.0')
 
 $ErrorActionPreference = 'Stop'
 $here    = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -23,5 +23,5 @@ if ($Rebuild) {
 if (-not (Test-Path "$pub\SimCityPak.exe")) { throw "Release build not found at $pub. Run with -Rebuild." }
 if (-not (Test-Path $wix)) { throw "wix.exe not found. Install: dotnet tool install --global wix --version 5.0.2" }
 
-& $wix build $wxs -d "PublishDir=$pub" -o $msi
+& $wix build $wxs -d "PublishDir=$pub" -d "Version=$Version" -o $msi
 if (Test-Path $msi) { Write-Host "Built: $msi ($([math]::Round((Get-Item $msi).Length/1MB,1)) MB)" -ForegroundColor Green }

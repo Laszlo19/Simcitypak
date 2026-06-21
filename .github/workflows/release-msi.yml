@@ -1,0 +1,61 @@
+name: Release MSI
+
+# Manually triggered: builds the app, packages the MSI, and publishes it as a
+# GitHub Release. Run it from the Actions tab ("Run workflow").
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version, e.g. 1.0.0 (used for the MSI and the v<version> release tag)"
+        required: true
+        default: "1.0.0"
+
+permissions:
+  contents: write   # needed to create the release
+
+jobs:
+  build-msi:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Restore NuGet packages
+        run: nuget restore SimCityPak.sln
+
+      - name: Build (Release | x86 | .NET Framework 4.8)
+        run: >
+          msbuild SimCityPak\SimCityPak.csproj
+          /p:Configuration=Release /p:Platform=x86
+          /p:TargetFrameworkVersion=v4.8 /p:TargetFrameworkProfile=
+          /m /v:minimal /nologo
+
+      - name: Install WiX v5
+        run: dotnet tool install --global wix --version 5.0.2
+
+      - name: Build MSI
+        run: >
+          wix build installer\SimCityPak.wxs
+          -d "PublishDir=${{ github.workspace }}\SimCityPak\bin\Release"
+          -d "Version=${{ inputs.version }}"
+          -o installer\SimCityPak.msi
+
+      - name: Upload MSI as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimCityPak-${{ inputs.version }}-msi
+          path: installer\SimCityPak.msi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: SimCityPak v${{ inputs.version }}
+          files: installer\SimCityPak.msi
+          generate_release_notes: true
+          fail_on_unmatched_files: true
