@@ -69,6 +69,7 @@
                 <MenuItem Header="Close all packages" Click="CloseAllPackages_click" />
                 <Separator/>
                 <MenuItem Header="Export all models + textures to folder..." Click="mnuExportAll_Click" />
+                <MenuItem Header="Export combined properties to folder..." Click="mnuExportCombinedProps_Click" />
                 <Separator/>
                 <MenuItem Header="Exit" Click="Exit_click" />
             </MenuItem>

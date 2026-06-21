@@ -114,6 +114,56 @@ namespace SimCityPak
             });
         }
 
+        /// <summary>Export the open packages' .prop resources, merging each asset's model +
+        /// gameplay + catalog props into one file per asset (the CLI's export-prop --combine).</summary>
+        private void mnuExportCombinedProps_Click(object sender, RoutedEventArgs e)
+        {
+            if (DatabaseManager.Instance.Indices == null || DatabaseManager.Instance.Indices.Count == 0)
+            {
+                System.Windows.MessageBox.Show("Open a package first.", "SimCityPak",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            // Yes = JSON, No = TXT, Cancel = abort.
+            MessageBoxResult fmt = System.Windows.MessageBox.Show(
+                "Export combined properties as JSON?\n\nYes = JSON, No = plain text.",
+                "Export combined properties", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+            if (fmt == MessageBoxResult.Cancel) return;
+            bool json = fmt == MessageBoxResult.Yes;
+
+            string folder;
+            using (FolderBrowserDialog dlg = new FolderBrowserDialog())
+            {
+                dlg.Description = "Choose a folder to export combined property files into";
+                dlg.ShowNewFolderButton = true;
+                if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+                folder = dlg.SelectedPath;
+            }
+
+            Logger.Info("GUI: export combined props -> " + folder + (json ? " (json)" : " (txt)"));
+            var indices = DatabaseManager.Instance.Indices.ToList();   // snapshot for the worker thread
+            string locale = Properties.Settings.Default.LocaleFile;
+            System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
+
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                string summary;
+                try { summary = Cli.CliRunner.ExportCombinedPropsToFolder(indices, folder, locale, json); }
+                catch (Exception ex)
+                {
+                    Logger.Exception("GUI export-combined-props", ex);
+                    summary = "Export failed: " + ex.Message + "\n\nSee the log in " + Logger.LogDirectory;
+                }
+                Dispatcher.Invoke(() =>
+                {
+                    System.Windows.Input.Mouse.OverrideCursor = null;
+                    System.Windows.MessageBox.Show(summary + "\n\nFolder: " + folder, "Export combined properties",
+                        MessageBoxButton.OK, MessageBoxImage.Information);
+                });
+            });
+        }
+
         /// <summary>
         /// Localized base file name (no extension) of the currently selected resource.
         /// Used as the default file name by the OBJ/DDS/PNG export dialogs in the sub-views.
