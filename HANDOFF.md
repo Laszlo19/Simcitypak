@@ -172,8 +172,34 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     wrapper that loads the package and prints the returned summary). The GUI menu *File ▸ Export
     combined properties to folder…* (`MainWindow.mnuExportCombinedProps_Click`) asks JSON/TXT,
     picks a folder, and runs it on a Task with a wait cursor — same pattern as *Export all*.
-    Possible enhancement: Model Details may have sibling/variant hashes for some asset types
-    (only `0x0975695f` handled so far).
+    **Sibling/variant Model Details hashes — INVESTIGATED, deliberately NOT added.** Question:
+    are there other property hashes that, like Model Details (`0x0975695f`), should link a
+    prop to its asset so combine assembles the *whole* asset (model + gameplay + lights + …)?
+    Empirically analysed `SimCity_DLC0`, `SimCity_Game` (base) and `SimCityDataEP1` with a
+    throwaway `analyze-prop-links` diagnostic (now removed). Findings:
+      * The descriptor DB has exactly ONE property named "Model Details" — no named sibling.
+      * Prop group containers encode facets: `…f0c000`/`40e1c000` = model (LODs, bounding box),
+        `…f0c900`/`09878a01` = catalog/menu, `…f0e800`/`40e0c000` = gameplay (kProp power/water/
+        jobs), `…f0c600` = lights/vehicles, `…f0c500` = actions, `…efc100`/`40e02d00` =
+        empty/effect placeholders (often SHARED across assets).
+      * `0x0975695f` (catalog→model) is the only CLEAN asset-identity link. Combined with the
+        existing same-instance union it correctly groups model+gameplay+catalog when model &
+        gameplay share an instance (the Oppie/train-station layout).
+      * The remaining cross-prop references are NOT safe to union on:
+        - `0x0d5a28b8` (model→gameplay/actions, very common: x1302 in base game) — following it
+          OVER-MERGES. A curated rule (Model Details + this link, gameplay facet only) looked
+          clean on DLC0 (largest component 8 props) but produced a **320-prop blob** on
+          `SimCity_Game` fusing 139 model + 110 gameplay + 69 catalog props of one building
+          family. Full transitive following gave 90-prop cross-family blobs even on DLC0.
+        - `Parent Menu` (`0x0db9fc63`) and Category Palette (`0x09a4ba03` etc.) point to SHARED
+          menu/category props referenced by many assets → would collapse everything.
+        - `Menu Item Icon` (`0x0977aa8f`), `Preview Image`, tool-unlock images → icon/image
+          refs, not asset structure.
+      * Conclusion: SimCity's prop graph genuinely interconnects whole building families, so
+        reference-following cannot define an asset boundary. `0x0975695f` + same-instance is the
+        correct, safe extent. Do NOT add more hashes. (Consequence: for base-game / EP1 assets
+        whose gameplay prop is a separate instance, the gameplay facet stays a separate file —
+        this is intentional, not a bug.)
 
 - **Localized export names (done):** for `.package` input, `export-obj/gltf/texture/prop` name
   files by **localized asset name** instead of TGI hashes. Add `--locale <Locale\xx-xx\Data.package>`
