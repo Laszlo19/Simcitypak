@@ -177,6 +177,7 @@ namespace SimCityPak
             SaveFileDialog dlg = new SaveFileDialog();
             dlg.DefaultExt = "png";
             dlg.Filter = "PNG|*.png";
+            dlg.FileName = MainWindow.SelectedExportName;   // localized name of the selected resource
             if (dlg.ShowDialog().GetValueOrDefault(false))
             {
                 if(RasterImage != null)
