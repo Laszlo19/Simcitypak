@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -48,6 +48,7 @@ namespace SimCityPak.Cli
                 case "export-texture":
                 case "export-prop":
                 case "export-audio":
+                case "export-all":
                 case "help":
                 case "--help":
                 case "-h":
@@ -65,6 +66,7 @@ namespace SimCityPak.Cli
             // console of their own). Harmless if launched without a parent console.
             AttachConsole(ATTACH_PARENT_PROCESS);
             Console.WriteLine();
+            Logger.Info("CLI: " + string.Join(" ", args));
 
             try
             {
@@ -78,6 +80,8 @@ namespace SimCityPak.Cli
                         return RunExportTextures(args);
                     case "export-prop":
                         return RunExportProp(args);
+                    case "export-all":
+                        return RunExportAll(args);
                     case "export-audio":
                         return RunExportAudio(args);
                     default:
@@ -87,6 +91,7 @@ namespace SimCityPak.Cli
             }
             catch (Exception ex)
             {
+                Logger.Exception("CLI " + (args.Length > 0 ? args[0] : ""), ex);
                 Console.WriteLine("ERROR: " + ex.Message);
                 return 1;
             }
@@ -113,6 +118,7 @@ namespace SimCityPak.Cli
             Console.WriteLine("  export-texture : RW4 textures -> .dds images     (<name>[_texN].dds)");
             Console.WriteLine("  export-prop    : .prop property lists -> readable .txt dump");
             Console.WriteLine("  export-audio   : Wwise Vorbis audio -> PCM .wav (via bundled vgmstream)");
+            Console.WriteLine("  export-all     : every model -> .glb AND every texture -> .dds, one folder");
             Console.WriteLine();
             Console.WriteLine("  When exporting from a .package, add  --locale <Locale\\xx-xx\\Data.package>");
             Console.WriteLine("  (or set it in the GUI Settings) to name files by their localized asset");
@@ -159,7 +165,7 @@ namespace SimCityPak.Cli
             else if (input.EndsWith(".package", StringComparison.OrdinalIgnoreCase))
             {
                 DatabasePackedFile package = DatabasePackedFile.LoadFromFile(input);
-                var nameMap = BuildLocaleNameMap(package, GetLocaleFile(args));
+                var nameMap = BuildLocaleNameMap(package.Indices, GetLocaleFile(args));
                 if (nameMap.Count > 0) Console.WriteLine("(using " + nameMap.Count + " localized names from the locale file)");
                 var used = new HashSet<string>();
                 foreach (DatabaseIndex index in package.Indices)
@@ -258,7 +264,7 @@ namespace SimCityPak.Cli
         /// to the prop's own instance and to every model (type 0x2f4e681b) it references
         /// via Key properties. Empty map if no locale / no names. Never throws.
         /// </summary>
-        private static Dictionary<uint, string> BuildLocaleNameMap(DatabasePackedFile package, string localeFile)
+        private static Dictionary<uint, string> BuildLocaleNameMap(IEnumerable<DatabaseIndex> indices, string localeFile)
         {
             var map = new Dictionary<uint, string>();
             if (string.IsNullOrEmpty(localeFile) || !File.Exists(localeFile)) return map;
@@ -270,7 +276,7 @@ namespace SimCityPak.Cli
             }
             catch { return map; }
 
-            foreach (DatabaseIndex index in package.Indices)
+            foreach (DatabaseIndex index in indices)
             {
                 if (index.TypeId != PROP_TYPE_ID) continue;
                 PropertyFile pf;
@@ -371,7 +377,7 @@ namespace SimCityPak.Cli
             else if (input.EndsWith(".package", StringComparison.OrdinalIgnoreCase))
             {
                 DatabasePackedFile package = DatabasePackedFile.LoadFromFile(input);
-                var nameMap = BuildLocaleNameMap(package, GetLocaleFile(args));
+                var nameMap = BuildLocaleNameMap(package.Indices, GetLocaleFile(args));
                 if (nameMap.Count > 0) Console.WriteLine("(using " + nameMap.Count + " localized names from the locale file)");
                 var used = new HashSet<string>();
                 foreach (DatabaseIndex index in package.Indices)
@@ -463,7 +469,7 @@ namespace SimCityPak.Cli
             else if (input.EndsWith(".package", StringComparison.OrdinalIgnoreCase))
             {
                 DatabasePackedFile package = DatabasePackedFile.LoadFromFile(input);
-                var nameMap = BuildLocaleNameMap(package, GetLocaleFile(args));
+                var nameMap = BuildLocaleNameMap(package.Indices, GetLocaleFile(args));
                 if (nameMap.Count > 0) Console.WriteLine("(using " + nameMap.Count + " localized names from the locale file)");
                 var used = new HashSet<string>();
                 foreach (DatabaseIndex index in package.Indices)
@@ -527,6 +533,98 @@ namespace SimCityPak.Cli
             }
 
             File.WriteAllText(outPath, sb.ToString());
+        }
+
+        // ----- export-all (models -> glTF + textures -> images) -------------
+
+        private static int RunExportAll(string[] args)
+        {
+            if (args.Length < 3)
+            {
+                Console.WriteLine("Usage: SimCityPak.exe export-all <input> <outputDir> [--locale <pkg>]");
+                return 2;
+            }
+            string input = args[1];
+            string outDir = args[2];
+            Directory.CreateDirectory(outDir);
+
+            int glb = 0, dds = 0, fails = 0;
+            Action<byte[], string> handle = (data, baseName) =>
+            {
+                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter().Export(m, p)); }
+                catch (Exception ex) { fails++; Logger.Exception("export-all model " + baseName, ex); Console.WriteLine("FAIL " + baseName + " (model) :: " + ex.Message); }
+                try { dds += ExportRw4Textures(data, outDir, baseName); }
+                catch (Exception ex) { fails++; Logger.Exception("export-all textures " + baseName, ex); Console.WriteLine("FAIL " + baseName + " (textures) :: " + ex.Message); }
+            };
+
+            if (Directory.Exists(input))
+            {
+                foreach (string file in Directory.GetFiles(input, "*.rw4"))
+                    handle(File.ReadAllBytes(file), Path.GetFileNameWithoutExtension(file));
+            }
+            else if (input.EndsWith(".package", StringComparison.OrdinalIgnoreCase))
+            {
+                DatabasePackedFile package = DatabasePackedFile.LoadFromFile(input);
+                var nameMap = BuildLocaleNameMap(package.Indices, GetLocaleFile(args));
+                if (nameMap.Count > 0) Console.WriteLine("(using " + nameMap.Count + " localized names from the locale file)");
+                var used = new HashSet<string>();
+                foreach (DatabaseIndex index in package.Indices)
+                {
+                    if (index.TypeId != RW4_MODEL_TYPE_ID) continue;
+                    string fallback = string.Format("{0:x8}-{1:x8}-{2:x8}",
+                        index.TypeId, index.GroupContainer, index.InstanceId);
+                    string baseName = ResolveBaseName(index.InstanceId, fallback, nameMap, used);
+                    handle(index.GetIndexData(true), baseName);
+                }
+            }
+            else if (File.Exists(input))
+            {
+                handle(File.ReadAllBytes(input), Path.GetFileNameWithoutExtension(input));
+            }
+            else
+            {
+                Console.WriteLine("ERROR: input not found: " + input);
+                return 2;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine(string.Format("Done. models(glb)={0} textures(dds)={1} failed={2}", glb, dds, fails));
+            Console.WriteLine("Output: " + Path.GetFullPath(outDir));
+            return fails > 0 ? 1 : 0;
+        }
+
+        /// <summary>
+        /// Exports every model (-&gt; .glb) and every texture (-&gt; .dds) from the given
+        /// resources into one folder, naming files by localized asset name when
+        /// <paramref name="localeFile"/> is provided. Returns a short summary; used by
+        /// the GUI "Export all" menu. Never throws (errors are logged per resource).
+        /// </summary>
+        public static string ExportAllToFolder(IEnumerable<DatabaseIndex> indices, string outDir, string localeFile)
+        {
+            Directory.CreateDirectory(outDir);
+            Logger.Info("Export-all -> " + outDir + (string.IsNullOrEmpty(localeFile) ? "" : " (locale: " + localeFile + ")"));
+            var nameMap = BuildLocaleNameMap(indices, localeFile);
+            var used = new HashSet<string>();
+            int glb = 0, dds = 0, fails = 0;
+            foreach (DatabaseIndex index in indices)
+            {
+                if (index.TypeId != RW4_MODEL_TYPE_ID) continue;
+                string fallback = string.Format("{0:x8}-{1:x8}-{2:x8}",
+                    index.TypeId, index.GroupContainer, index.InstanceId);
+                string baseName = ResolveBaseName(index.InstanceId, fallback, nameMap, used);
+                byte[] data;
+                try { data = index.GetIndexData(true); }
+                catch (Exception ex) { fails++; Logger.Exception("export-all read " + baseName, ex); continue; }
+                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter().Export(m, p)); }
+                catch (Exception ex) { fails++; Logger.Exception("export-all model " + baseName, ex); }
+                try { dds += ExportRw4Textures(data, outDir, baseName); }
+                catch (Exception ex) { fails++; Logger.Exception("export-all textures " + baseName, ex); }
+            }
+            string summary = string.Format(
+                "Exported {0} models (.glb) and {1} textures (.dds); {2} failed.\nLocalized names: {3}.",
+                glb, dds, fails, nameMap.Count);
+            Logger.Info(summary.Replace(Environment.NewLine, " "));
+            return summary;
         }
 
         // ----- export-audio -------------------------------------------------

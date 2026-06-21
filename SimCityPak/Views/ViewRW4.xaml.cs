@@ -77,9 +77,9 @@ namespace SimCityPak
                         dataGrid1.SelectedItem = sec2;
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
-
+                    Logger.Exception("ViewRW4.DataContextChanged (RW4 model parse/preview)", ex);
                 }
 
             }

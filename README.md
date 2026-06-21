@@ -21,8 +21,19 @@ SimCityPak.exe export-gltf    <input> <outputDir>  # RW4 models   -> binary glTF
 SimCityPak.exe export-texture <input> <outputDir>  # RW4 textures -> .dds images
 SimCityPak.exe export-prop    <input> <outputDir>  # .prop property lists -> readable .txt
 SimCityPak.exe export-audio   <input> <outputDir>  # Wwise Vorbis audio -> playable PCM .wav
+SimCityPak.exe export-all     <input> <outputDir>  # every model -> .glb AND every texture -> .dds
 SimCityPak.exe help                                # usage
 ```
+
+`export-all` writes **all models as `.glb` and all their textures as `.dds`** into one folder
+(localized names with `--locale`). The GUI has the same action under **File ▸ Export all models
++ textures to folder…** for the currently loaded package(s).
+
+### Logging
+The app writes a log to **`%USERPROFILE%\Documents\SimCityPak\simcitypak-<date>.log`** — startup
+info, the resource being viewed, package loads, exports, and (most importantly) **full stack
+traces for any crash or swallowed error**. Unhandled UI-thread exceptions are logged and the app
+tries to stay alive instead of crashing. Attach this log when reporting a bug.
 
 For every command, `<input>` may be:
 - a **`.package`** file — exports every matching resource inside it,

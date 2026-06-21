@@ -140,6 +140,21 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     (committed; copied next to the exe via a `<Content>` item with CopyToOutputDirectory). The
     old loose vgmstream that lived in `simcity sounds\_tools\` has since been removed — the
     app's bundled copy is now authoritative.
+  - `export-all <input> <outputDir> [--locale]` — every model → `.glb` AND its textures → `.dds`
+    into one folder (localized names). Core is `public CliRunner.ExportAllToFolder(IEnumerable
+    <DatabaseIndex>, outDir, localeFile)`, also called by the **GUI** menu *File ▸ Export all
+    models + textures to folder…* (`MainWindow.mnuExportAll_Click`, runs on a Task with a wait
+    cursor). `BuildLocaleNameMap` now takes `IEnumerable<DatabaseIndex>` so both share it.
+
+**Logging (added — debug the "app crashes sometimes" complaint):** `SimCityPak\Logging\Logger.cs`
+writes to `%USERPROFILE%\Documents\SimCityPak\simcitypak-<date>.log` (thread-safe, never throws).
+`App.OnStartup` wires `AppDomain.UnhandledException` + `DispatcherUnhandledException` (the latter
+logs and sets `Handled=true` to keep the GUI alive). Operation logs added at package load, resource
+selection, the previously-silent `catch{}` blocks in ViewRW4/ViewMesh/ViewTexture, and all CLI
+commands. NOTE: the 64-bit request was dropped in favour of logging — XNA 4.0 is x86-only (PE32)
+and is the math+graphics library across ~12 files (357 Vector/Matrix uses + 1770-line DDSLib), so
+going x64 needs a full XNA removal (System.Numerics/MonoGame + managed DDS decode) — a separate
+large effort.
 
 **Export pipeline (reuse this for new formats):**
 ```

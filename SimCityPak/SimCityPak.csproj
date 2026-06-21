@@ -151,6 +151,7 @@
       <SubType>Code</SubType>
     </Compile>
     <Compile Include="Cli\CliRunner.cs" />
+    <Compile Include="Logging\Logger.cs" />
     <Compile Include="PackageReader\DataBaseIndex.cs" />
     <Compile Include="PackageReader\DatabaseManager.cs" />
     <Compile Include="PackageReader\Helpers\PropertyFiles\PropertyFileArrayPropertyAttribute.cs" />

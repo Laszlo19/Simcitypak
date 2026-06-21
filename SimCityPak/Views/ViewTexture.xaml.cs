@@ -82,6 +82,7 @@ namespace SimCityPak
                             }
                             catch (Exception ex)
                             {
+                                Logger.Exception("ViewTexture texture preview", ex);
                                 texturePreview.Visibility = System.Windows.Visibility.Hidden;
                                 textBlockError.Visibility = System.Windows.Visibility.Visible;
                                 textBlockError.Text = ex.Message;
@@ -293,6 +294,7 @@ namespace SimCityPak
                             }
                             catch (Exception ex)
                             {
+                                Logger.Exception("ViewTexture texture preview", ex);
                                 texturePreview.Visibility = System.Windows.Visibility.Hidden;
                                 textBlockError.Visibility = System.Windows.Visibility.Visible;
                                 textBlockError.Text = ex.Message;
