@@ -181,6 +181,19 @@ use. (The bulk-converted `converted\` folder, ~4 GB, was deleted to save space; 
 
 ---
 
+## 6b. Installer (MSI) — done
+
+`installer\SimCityPak.wxs` + `installer\build-msi.ps1` build a Windows Installer that drops
+the whole Release output into `Program Files\SimCityPak` (Start-Menu shortcut + ARP entry).
+Uses **WiX v5** (`dotnet tool install --global wix --version 5.0.2`) — NOT v6/v7, which demand
+the paid OSMF EULA. The `<Files Include="$(PublishDir)\**">` element harvests the folder.
+Built/validated: 9.9 MB MSI, 48 files via `msiexec /a` extract (exe, XNA, SQLite, vgmstream
+tools, .s3db all present). A real `/i` install needs admin (UAC) — fine on a normal double-click;
+it failed here only because the sandbox is non-elevated (Error 1925). `.msi`/`.wixpdb` are
+gitignored; ship the MSI on a GitHub Release.
+
+---
+
 ## 7. Git / GitHub status
 
 - Repo root: `C:\Projects\simcitypak\SimCityPak-main\SimCityPak-main\` (folder with `SimCityPak.sln`).

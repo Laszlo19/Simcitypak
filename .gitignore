@@ -360,3 +360,8 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Installer build outputs (the WiX authoring is committed; the built .msi goes
+# on a GitHub Release, not in the repo).
+installer/*.msi
+installer/*.wixpdb

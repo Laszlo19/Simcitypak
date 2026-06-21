@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WiX (v4+) authoring for the SimCityPak MSI installer.
+
+  Build (see installer/build-msi.ps1):
+    wix build SimCityPak.wxs -d PublishDir="..\SimCityPak\bin\Release" -o SimCityPak.msi
+
+  Harvests the whole Release output (exe + all dependency DLLs, the bundled
+  vgmstream tools, the .s3db databases, etc.) into "Program Files\SimCityPak".
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="SimCityPak"
+           Manufacturer="SimCityPak community fork"
+           Version="1.0.0.0"
+           UpgradeCode="CE8D766B-06F8-44E0-B9CB-0AFA5610423E"
+           Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of SimCityPak is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="Main" Title="SimCityPak">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="SimCityPak" />
+    </StandardDirectory>
+  </Fragment>
+
+  <!-- Harvest every file in the Release output, preserving subfolders
+       (Tools\vgmstream\, etc.). -->
+  <Fragment>
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Files Include="$(PublishDir)\**" />
+    </ComponentGroup>
+  </Fragment>
+
+  <!-- Start Menu shortcut to the GUI. -->
+  <Fragment>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="*">
+        <Shortcut Id="AppStartMenuShortcut"
+                  Name="SimCityPak"
+                  Description="SimCity 2013 package/asset editor"
+                  Target="[INSTALLFOLDER]SimCityPak.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="CleanupShortcut" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\SimCityPak"
+                       Name="installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+  </Fragment>
+</Wix>

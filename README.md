@@ -82,6 +82,23 @@ Output: `SimCityPak\bin\Release\SimCityPak.exe`.
 See **`BUILD_NOTES.md`** for the full list of fixes required to build (XNA, retarget,
 OutputPath, a source typo) and **`HANDOFF.md`** for project history and the roadmap.
 
+## Installer (MSI)
+
+A Windows Installer package can be built from the Release output with the
+**[WiX Toolset](https://wixtoolset.org/) v5** (the last free version — v6+ requires the
+paid OSMF EULA):
+
+```powershell
+dotnet tool install --global wix --version 5.0.2
+installer\build-msi.ps1          # or  build-msi.ps1 -Rebuild  to compile first
+```
+
+This produces `installer\SimCityPak.msi` (~10 MB) — installs the app and all its
+dependencies (XNA, SQLite, the bundled vgmstream tools, the `.s3db` databases) into
+`Program Files\SimCityPak`, with a Start-Menu shortcut and an Add/Remove Programs entry.
+The authoring is in `installer\SimCityPak.wxs`. (Double-click the MSI to install; it
+elevates via UAC.)
+
 ---
 
 ## Status
