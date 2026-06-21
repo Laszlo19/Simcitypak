@@ -29,6 +29,12 @@ For every command, `<input>` may be:
 - a **folder** — exports every matching file (`*.rw4` / `*.wav`) in it,
 - a single **file** — exports just that one.
 
+**Localized names:** when exporting from a `.package`, add
+`--locale "<SimCity>\SimCityData\Locale\xx-xx\Data.package"` (or set the locale file in the
+GUI Settings) and exported models / textures / props are named by their **localized asset
+name** (e.g. `Maxis Manor.glb`, `Baccarat Room.obj`) instead of TGI hashes. Names are resolved
+through the package's property files; resources without a resolvable name keep the hash name.
+
 - **`export-obj`** writes each model's mesh sections as `<name>[_meshN].obj`.
   Texture-only resources (no mesh) are reported as `SKIP`.
 - **`export-gltf`** writes each model as a self-contained binary **glTF 2.0** `.glb`
