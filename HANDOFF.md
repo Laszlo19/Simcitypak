@@ -125,6 +125,11 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     CLI from elsewhere). Added `ResolveDbPath` (falls back to `AppDomain.BaseDirectory`) — also
     fixes the GUI launched from another directory. Verified end-to-end on DLC0 + en-us locale:
     "Airship Hangar.json" with Menu Item Title/Description etc. resolved.
+    **GUI + invariant culture (done):** the dump core is now `public CliRunner.DumpPropertyFile`
+    which wraps `DumpProp` in `CultureInfo.InvariantCulture` (Transform/vector values use '.'
+    decimals, not locale commas). The GUI calls it from a new context-menu item
+    `mnuExportProperties_Click` (MainWindow) -> SaveFileDialog (TXT/JSON) on any prop resource.
+    Verified: Transform now `0.9993909,0.03489691,...` instead of `0,9993909,0,03489691`.
 
 - **Localized export names (done):** for `.package` input, `export-obj/gltf/texture/prop` name
   files by **localized asset name** instead of TGI hashes. Add `--locale <Locale\xx-xx\Data.package>`

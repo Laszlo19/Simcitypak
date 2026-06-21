@@ -64,7 +64,10 @@ through the package's property files; resources without a resolvable name keep t
   `LOD1`, `Is Module`), falling back to `0x<hash>` for undocumented ones — so a building's
   display name, description, menu placement, model/LOD refs and tuning come out readable.
   Output is `.txt` by default or **`.json`** with `--json`. Handles every property type (Float,
-  Bool, Key/TGI, Vector2/3/4, Color, BoundingBox, Transform, String8/16, arrays, …).
+  Bool, Key/TGI, Vector2/3/4, Color, BoundingBox, Transform, String8/16, arrays, …). Numbers use
+  invariant culture (always `.` decimals) so Transform/vector values aren't ambiguous on
+  comma-decimal locales. The **GUI** has the same export under right-click ▸ **Export Properties
+  (TXT/JSON)…** on any property resource.
 - **`export-audio`** decodes SimCity's Audiokinetic **Wwise Vorbis** audio (RIFF with
   codec `0xFFFF`, which normal players reject) into standard PCM `.wav`. It uses
   **[vgmstream](https://github.com/vgmstream/vgmstream)**, bundled in `Tools\vgmstream\`

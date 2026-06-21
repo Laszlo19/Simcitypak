@@ -464,7 +464,7 @@ namespace SimCityPak.Cli
                     {
                         var pf = new PropertyFile();
                         using (var ms = new MemoryStream(File.ReadAllBytes(file))) pf.Read(ms);
-                        DumpProp(pf, Path.Combine(outDir, baseName + ext), baseName, json);
+                        DumpPropertyFile(pf, Path.Combine(outDir, baseName + ext), baseName, json);
                         ok++; Console.WriteLine("OK   " + baseName + ext);
                     }
                     catch (Exception ex) { fails++; Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
@@ -485,7 +485,7 @@ namespace SimCityPak.Cli
                     try
                     {
                         var pf = new PropertyFile(index);
-                        DumpProp(pf, Path.Combine(outDir, baseName + ext), baseName, json);
+                        DumpPropertyFile(pf, Path.Combine(outDir, baseName + ext), baseName, json);
                         ok++; Console.WriteLine("OK   " + baseName + ext);
                     }
                     catch (Exception ex) { fails++; Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
@@ -498,7 +498,7 @@ namespace SimCityPak.Cli
                 {
                     var pf = new PropertyFile();
                     using (var ms = new MemoryStream(File.ReadAllBytes(input))) pf.Read(ms);
-                    DumpProp(pf, Path.Combine(outDir, baseName + ext), baseName, json);
+                    DumpPropertyFile(pf, Path.Combine(outDir, baseName + ext), baseName, json);
                     ok++; Console.WriteLine("OK   " + baseName + ext);
                 }
                 catch (Exception ex) { fails++; Console.WriteLine("FAIL " + baseName + " :: " + ex.Message); }
@@ -543,6 +543,17 @@ namespace SimCityPak.Cli
         {
             try { return p == null ? "" : p.DisplayValue; }
             catch (Exception ex) { return "<error: " + ex.Message + ">"; }
+        }
+
+        /// <summary>Writes a property file as readable text or JSON, resolving property
+        /// names where SimCityPak knows them, with invariant-culture numbers ('.' decimals).
+        /// Public so the GUI can reuse the exact same dump. Sorted by hash.</summary>
+        public static void DumpPropertyFile(PropertyFile pf, string outPath, string name, bool json)
+        {
+            var prev = System.Threading.Thread.CurrentThread.CurrentCulture;
+            System.Threading.Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+            try { DumpProp(pf, outPath, name, json); }
+            finally { System.Threading.Thread.CurrentThread.CurrentCulture = prev; }
         }
 
         /// <summary>Writes a property file as readable text or JSON, resolving property
