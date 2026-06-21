@@ -116,11 +116,11 @@ namespace SimCityPak.Cli
             Console.WriteLine();
             Console.WriteLine("  export-obj     : RW4 models   -> Wavefront .obj  (<name>[_meshN].obj)");
             Console.WriteLine("  export-gltf    : RW4 models   -> binary glTF .glb (<name>[_meshN].glb)");
-            Console.WriteLine("  export-texture : RW4 textures -> .dds images     (<name>[_texN].dds)");
+            Console.WriteLine("  export-texture : RW4 textures -> images (--format png|jpg|tga|dds, default png)");
             Console.WriteLine("  export-prop    : .prop property lists -> readable .txt (or .json with --json),");
             Console.WriteLine("                   property names resolved where SimCityPak knows them");
             Console.WriteLine("  export-audio   : Wwise Vorbis audio -> PCM .wav (via bundled vgmstream)");
-            Console.WriteLine("  export-all     : every model -> .glb AND every texture -> .dds, one folder");
+            Console.WriteLine("  export-all     : every model -> .glb AND every texture -> image, one folder");
             Console.WriteLine();
             Console.WriteLine("  When exporting from a .package, add  --locale <Locale\\xx-xx\\Data.package>");
             Console.WriteLine("  (or set it in the GUI Settings) to name files by their localized asset");
@@ -220,7 +220,11 @@ namespace SimCityPak.Cli
                 model.Read(ms);
 
             var meshSections = model.Sections
-                .Where(s => s.TypeCode == SectionTypeCodes.Mesh && s.obj is RW4Mesh)
+                .Where(s => s.TypeCode == SectionTypeCodes.Mesh && s.obj is RW4Mesh
+                            && ((RW4Mesh)s.obj).vertices != null
+                            && ((RW4Mesh)s.obj).vertices.vertices != null
+                            && ((RW4Mesh)s.obj).triangles != null
+                            && ((RW4Mesh)s.obj).triangles.triangles != null)
                 .ToList();
 
             int written = 0;
@@ -351,12 +355,13 @@ namespace SimCityPak.Cli
         {
             if (args.Length < 3)
             {
-                Console.WriteLine("Usage: SimCityPak.exe export-texture <input> <outputDir>");
+                Console.WriteLine("Usage: SimCityPak.exe export-texture <input> <outputDir> [--format png|jpg|tga|dds]");
                 return 2;
             }
             string input = args[1];
             string outDir = args[2];
             Directory.CreateDirectory(outDir);
+            string format = GetTextureFormat(args);
 
             int res = 0, textures = 0, fails = 0;
 
@@ -364,7 +369,7 @@ namespace SimCityPak.Cli
             {
                 try
                 {
-                    int t = ExportRw4Textures(data, outDir, baseName);
+                    int t = ExportRw4Textures(data, outDir, baseName, format);
                     if (t > 0) { res++; textures += t; }
                     else Console.WriteLine("SKIP " + baseName + " (no texture)");
                 }
@@ -401,13 +406,54 @@ namespace SimCityPak.Cli
             }
 
             Console.WriteLine();
-            Console.WriteLine(string.Format("Done. resources={0} textures(dds)={1} failed={2}", res, textures, fails));
+            Console.WriteLine(string.Format("Done. resources={0} textures({1})={2} failed={3}", res, format, textures, fails));
             Console.WriteLine("Output: " + Path.GetFullPath(outDir));
             return fails > 0 ? 1 : 0;
         }
 
         /// <summary>Parses RW4 bytes and writes each Texture section as a .dds.</summary>
-        private static int ExportRw4Textures(byte[] data, string outDir, string baseName)
+        /// <summary>Texture output format from --format (png|jpg|tga|dds); default png.</summary>
+        private static string GetTextureFormat(string[] args)
+        {
+            for (int i = 0; i < args.Length - 1; i++)
+                if (args[i].Equals("--format", StringComparison.OrdinalIgnoreCase))
+                {
+                    string fmt = args[i + 1].ToLowerInvariant().TrimStart('.');
+                    if (fmt == "jpeg") fmt = "jpg";
+                    if (fmt == "png" || fmt == "jpg" || fmt == "tga" || fmt == "dds") return fmt;
+                }
+            return "png";
+        }
+
+        private static void SaveBitmap(System.Drawing.Bitmap bmp, string path, string format)
+        {
+            if (format == "jpg") bmp.Save(path, System.Drawing.Imaging.ImageFormat.Jpeg);
+            else if (format == "tga") SaveTga(bmp, path);
+            else bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+        }
+
+        private static void SaveTga(System.Drawing.Bitmap bmp, string path)
+        {
+            int w = bmp.Width, h = bmp.Height;
+            var bd = bmp.LockBits(new System.Drawing.Rectangle(0, 0, w, h),
+                System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            byte[] bgra = new byte[w * h * 4];
+            System.Runtime.InteropServices.Marshal.Copy(bd.Scan0, bgra, 0, bgra.Length);
+            bmp.UnlockBits(bd);
+            using (var fs = File.Create(path))
+            using (var bw = new BinaryWriter(fs))
+            {
+                bw.Write((byte)0); bw.Write((byte)0); bw.Write((byte)2);     // uncompressed true-color
+                bw.Write((short)0); bw.Write((short)0); bw.Write((byte)0);   // color map spec
+                bw.Write((short)0); bw.Write((short)0);                      // x/y origin
+                bw.Write((short)w); bw.Write((short)h);
+                bw.Write((byte)32);                                         // 32 bpp (BGRA)
+                bw.Write((byte)0x20);                                       // top-left origin, 8 alpha bits
+                bw.Write(bgra);                                            // BGRA, top-down
+            }
+        }
+
+        private static int ExportRw4Textures(byte[] data, string outDir, string baseName, string format)
         {
             RW4Model model = new RW4Model();
             using (var ms = new MemoryStream(data))
@@ -422,10 +468,25 @@ namespace SimCityPak.Cli
             {
                 Texture tex = (Texture)texSections[i].obj;
                 string suffix = texSections.Count > 1 ? ("_tex" + i) : "";
-                string outPath = Path.Combine(outDir, baseName + suffix + ".dds");
+                string outPath = Path.Combine(outDir, baseName + suffix + "." + format);
                 try
                 {
-                    tex.SaveDds(outPath);
+                    if (format == "dds")
+                    {
+                        tex.SaveDds(outPath);
+                    }
+                    else
+                    {
+                        using (System.Drawing.Bitmap bmp = GltfConverter.DecodeTextureToBitmap(tex))
+                        {
+                            if (bmp == null)
+                            {
+                                Console.WriteLine("SKIP " + baseName + suffix + " (unsupported texture format)");
+                                continue;
+                            }
+                            SaveBitmap(bmp, outPath, format);
+                        }
+                    }
                     written++;
                     Console.WriteLine("OK   " + Path.GetFileName(outPath));
                 }
@@ -609,19 +670,20 @@ namespace SimCityPak.Cli
         {
             if (args.Length < 3)
             {
-                Console.WriteLine("Usage: SimCityPak.exe export-all <input> <outputDir> [--locale <pkg>]");
+                Console.WriteLine("Usage: SimCityPak.exe export-all <input> <outputDir> [--format png|jpg|tga|dds] [--locale <pkg>]");
                 return 2;
             }
             string input = args[1];
             string outDir = args[2];
             Directory.CreateDirectory(outDir);
+            string format = GetTextureFormat(args);
 
-            int glb = 0, dds = 0, fails = 0;
+            int glb = 0, tex = 0, fails = 0;
             Action<byte[], string> handle = (data, baseName) =>
             {
                 try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter().Export(m, p)); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all model " + baseName, ex); Console.WriteLine("FAIL " + baseName + " (model) :: " + ex.Message); }
-                try { dds += ExportRw4Textures(data, outDir, baseName); }
+                try { tex += ExportRw4Textures(data, outDir, baseName, format); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all textures " + baseName, ex); Console.WriteLine("FAIL " + baseName + " (textures) :: " + ex.Message); }
             };
 
@@ -656,7 +718,7 @@ namespace SimCityPak.Cli
             }
 
             Console.WriteLine();
-            Console.WriteLine(string.Format("Done. models(glb)={0} textures(dds)={1} failed={2}", glb, dds, fails));
+            Console.WriteLine(string.Format("Done. models(glb)={0} textures({1})={2} failed={3}", glb, format, tex, fails));
             Console.WriteLine("Output: " + Path.GetFullPath(outDir));
             return fails > 0 ? 1 : 0;
         }
@@ -667,13 +729,13 @@ namespace SimCityPak.Cli
         /// <paramref name="localeFile"/> is provided. Returns a short summary; used by
         /// the GUI "Export all" menu. Never throws (errors are logged per resource).
         /// </summary>
-        public static string ExportAllToFolder(IEnumerable<DatabaseIndex> indices, string outDir, string localeFile)
+        public static string ExportAllToFolder(IEnumerable<DatabaseIndex> indices, string outDir, string localeFile, string format = "png")
         {
             Directory.CreateDirectory(outDir);
-            Logger.Info("Export-all -> " + outDir + (string.IsNullOrEmpty(localeFile) ? "" : " (locale: " + localeFile + ")"));
+            Logger.Info("Export-all -> " + outDir + " (textures: " + format + ")" + (string.IsNullOrEmpty(localeFile) ? "" : " (locale: " + localeFile + ")"));
             var nameMap = BuildLocaleNameMap(indices, localeFile);
             var used = new HashSet<string>();
-            int glb = 0, dds = 0, fails = 0;
+            int glb = 0, tex = 0, fails = 0;
             foreach (DatabaseIndex index in indices)
             {
                 if (index.TypeId != RW4_MODEL_TYPE_ID) continue;
@@ -685,12 +747,12 @@ namespace SimCityPak.Cli
                 catch (Exception ex) { fails++; Logger.Exception("export-all read " + baseName, ex); continue; }
                 try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter().Export(m, p)); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all model " + baseName, ex); }
-                try { dds += ExportRw4Textures(data, outDir, baseName); }
+                try { tex += ExportRw4Textures(data, outDir, baseName, format); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all textures " + baseName, ex); }
             }
             string summary = string.Format(
-                "Exported {0} models (.glb) and {1} textures (.dds); {2} failed.\nLocalized names: {3}.",
-                glb, dds, fails, nameMap.Count);
+                "Exported {0} models (.glb) and {1} textures (.{2}); {3} failed.\nLocalized names: {4}.",
+                glb, tex, format, fails, nameMap.Count);
             Logger.Info(summary.Replace(Environment.NewLine, " "));
             return summary;
         }

@@ -130,6 +130,17 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     decimals, not locale commas). The GUI calls it from a new context-menu item
     `mnuExportProperties_Click` (MainWindow) -> SaveFileDialog (TXT/JSON) on any prop resource.
     Verified: Transform now `0.9993909,0.03489691,...` instead of `0,9993909,0,03489691`.
+    **Log-driven fixes (done):** the user's `Documents\SimCityPak\*.log` showed a
+    NullReferenceException at `GltfConverter.Export` line 36 for blend-shape meshes (null
+    `mesh.vertices`). Guarded both in `Export` and in the `ExportRw4Bytes` mesh filter (skip
+    meshes with null vertices/triangles). **Orientation:** added a `-90° about X` node rotation
+    (`[-0.70710678,0,0,0.70710678]`) so RW4 Z-up models stand upright in glTF Y-up — confirmed
+    correct by the prop bounding box (`MinZ=0..MaxZ` = height from base). **Texture formats:**
+    `export-texture` / `export-all` now take `--format png|jpg|tga|dds` (default png) — DXT decoded
+    via `GltfConverter.DecodeTextureToBitmap` + System.Drawing (png/jpg) or a small TGA writer.
+    **Gameplay properties** (Power Consumer Rate/Amount/Capacity, kPropWork_MinimumWorkers...,
+    kPropWaterConsumer_*) already resolve via the descriptor DB — they live in the building's
+    GAMEPLAY prop, not the model prop.
 
 - **Localized export names (done):** for `.package` input, `export-obj/gltf/texture/prop` name
   files by **localized asset name** instead of TGI hashes. Add `--locale <Locale\xx-xx\Data.package>`
