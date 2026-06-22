@@ -137,20 +137,15 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     TODO on the .glb: DXT-compressed raster images (pixFmt != 21), .obj/.mtl textures, skeleton,
     animation. export-obj is untextured (no .mtl emitted).
 
-    **Facade-palette compositing (done — fixes the "neon" base color).** SimCity buildings have
-    **no baked albedo**. The material's slots are: u1=0 a small per-model **palette** strip
-    (float32 RGBA, D3DFMT_A32B32G32R32F = textureType **116**, e.g. 94x4), u1=1 a **region/zone
-    mask** (the false-colour atlas), u1=2 the **normal** map, u1=3 a secondary mask. The final
-    facade colour = `palette[ mask.R ]` (the mask's RED channel is a 1-D coordinate into the
-    palette, linearly sampled — the GPU does this at runtime). Determined empirically by decoding
-    both and testing index hypotheses (RED + row 0 + linear interp gave clean building colours;
-    confirmed visually). Implementation in `CliRunner`: `DecodePaletteRow0` reads the float32
-    palette's row 0 (clamped 0..1), `CompositeFacade` maps the region mask's red through it
-    (linear), and `ResolveTextures` composites when a palette is present (else keeps the raw map
-    — models with a real diffuse are unaffected). Applies to CLI export-gltf/export-all and the
-    GUI export. Verified: EP1 buildings and the Central Train Station now export natural facade
-    colours (olive/brick / dark metal) instead of the neon region atlas. Note the region mask +
-    normal atlases are often **shared** across many models (per-model palette makes them differ).
+    **KNOWN LIMITATION — base color looks "neon/false-colour" for many buildings.** Investigated
+    from a user report (models render as green/red/magenta checkerboards). Root cause: SimCity
+    buildings have **no baked albedo**. The material's slots are: u1=0 a small (e.g. 94x4) HDR
+    **palette** strip (D3DFMT_A16B16G16R16F = textureType 116, which the headless decoder doesn't
+    handle), u1=1 a **region/zone mask** (the neon false-colour atlas — what we currently export as
+    base color), u1=2 the **normal** map, u1=3 a secondary mask. The game composites the final
+    facade colour at runtime as roughly `palette[region]`. Reproducing it needs facade-palette
+    compositing (decode the half-float palette + map the zone atlas's region channel through it) —
+    a real, separate feature, not yet done. The neon export is the raw region atlas.
     Also note: many buildings legitimately **share** the same base + normal atlas (e.g. 18 EP1
     models share base 0x1188b12e / normal 0xa3791e5c) — that's correct (shared atlases indexed by
     per-model UVs + per-model palette), NOT a bug, even though it looks like "every model has the
