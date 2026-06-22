@@ -174,6 +174,7 @@ namespace SporeMaster.RenderWare4
                 sd.VJoints = new ushort[vCount * 4];
                 sd.VWeights = new float[vCount * 4];
                 var verts = mesh.vertices.vertices;
+                bool meshHasBlend = false;
                 for (int v = 0; v < vCount; v++)
                 {
                     ushort[] idx = { 0, 0, 0, 0 };
@@ -185,12 +186,17 @@ namespace SporeMaster.RenderWare4
                             if (c.Usage == D3DDECLUSAGE.D3DDECLUSAGE_BLENDINDICES) { ReadQuadU(c, idx, n); gotIdx = true; }
                             else if (c.Usage == D3DDECLUSAGE.D3DDECLUSAGE_BLENDWEIGHT) { ReadQuadF(c, wt); gotWt = true; }
                         }
+                    if (gotIdx && (idx[0] != 0 || idx[1] != 0 || idx[2] != 0 || idx[3] != 0)) meshHasBlend = true;
                     if (!gotIdx) { idx[0] = 0; }
                     if (!gotWt) { wt[0] = 1; wt[1] = wt[2] = wt[3] = 0; }
                     float sum = wt[0] + wt[1] + wt[2] + wt[3];
                     if (sum <= 0.0001f) { wt[0] = 1; sum = 1; }
                     for (int k = 0; k < 4; k++) { sd.VJoints[v * 4 + k] = idx[k]; sd.VWeights[v * 4 + k] = wt[k] / sum; }
                 }
+                // Without real per-vertex blend data every vertex would bind to joint 0 (the static
+                // root), so any animation of the other joints moves nothing — a misleading "empty"
+                // animation. Skip the skin entirely for such meshes; they export as a static model.
+                if (!meshHasBlend) return null;
 
                 // animations: map each channel (by joint name fnv, else by order) to a joint
                 var byFnv = new Dictionary<uint, int>();

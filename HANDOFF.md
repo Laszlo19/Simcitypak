@@ -165,6 +165,12 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     quaternions; valid glTF skin (joints in range, weights normalised, bind pose undeformed).
     Static models (no skeleton) unchanged. NOTE matrix helpers (`Mat4Mul`/`Mat4Inverse`/
     `Mat4DecomposeTRS`) live in GltfConverter; quaternion order is xyzw (glTF).
+    **Skin requires real blend data.** A skeleton+animation is only emitted when the mesh has
+    actual per-vertex `BLENDINDICES` (non-zero). Without them every vertex would bind to joint 0
+    (the static root) and the other joints' motion would move nothing — a misleading "empty"
+    animation (reported by the user on many building models). `ExtractSkin` now returns null in
+    that case, so the model exports as a clean static mesh. Real skinned models (vehicles/
+    characters / multi-bone-weighted buildings like ec3eade0) still get skin + animation.
     **Facade-building UVs (gated).** Real models (vehicles/props/characters) carry a clean FLOAT2
     UV. Facade buildings have only a FLOAT4 texcoord that is a large WORLD-projection coordinate
     (adjacent verts share ~identical values) — using it scrambles any flat texture. The exporter
