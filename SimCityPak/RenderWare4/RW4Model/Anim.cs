@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -10,117 +10,194 @@ using System.Globalization;
 
 namespace SporeMaster.RenderWare4
 {
+    /// <summary>
+    /// A keyframe-animation section (0x70001). One channel per animated joint; each channel
+    /// holds time-stamped TRS keyframes. SimCity uses the "LocRot" pose format (0x101: rotation
+    /// + translation, no scale), Spore the "LocRotScale" (0x601). Parsing ported from the
+    /// SporeModder Blender add-on (rw4_base.KeyframeAnim). Read fills <see cref="channels"/>;
+    /// Write round-trips it so models that carry animations still save correctly.
+    /// </summary>
     class Anim : RW4Object
     {
         public const int type_code = 0x70001;
-        public UInt32 skeleton_id;  // matches Skeleton.jointInfo.id (or something else sometimes!)
-        public float length;   // seconds?
-        public UInt32 flags;   // probably; generally 0-3
-        public UInt32[] channel_names;  // duplicate Skeleton.jointInfo, I believe
-        public JointPose[,] channel_frame_pose;
-        public UInt32 padding;
+
+        public struct Key
+        {
+            public float qx, qy, qz, qw;   // rotation quaternion
+            public float tx, ty, tz;       // translation
+            public float sx, sy, sz;       // scale (1 when the format carries no scale)
+            public float time;             // seconds
+        }
+
+        public class Channel
+        {
+            public uint id;                // joint name fnv (matches HierarchyInfo item)
+            public uint components;        // 0x601 LocRotScale | 0x101 LocRot | 0x100 BlendFactor
+            public uint poseSize;          // bytes per keyframe as stored
+            public List<Key> keys = new List<Key>();
+        }
+
+        public uint skeleton_id;
+        public float length;               // seconds
+        public uint flags;
+        public uint field_C, field_1C, field_24;
+        public Channel[] channels;
+
+        // legacy accessors some callers may expect
+        public uint[] channel_names { get { return channels == null ? null : channels.Select(c => c.id).ToArray(); } }
+
+        private static int PoseSizeFor(uint components)
+        {
+            switch (components)
+            {
+                case 0x601: return 48;   // rot4 + loc3 + scale3 + pad + time
+                case 0x101: return 36;   // rot4 + loc3 + time
+                case 0x100: return 8;    // factor + time
+                default: return 0;
+            }
+        }
 
         public override void Read(RW4Model m, RW4Section s, Stream r)
         {
             if (s.type_code != type_code) throw new ModelFormatException(r, "AN000", s.type_code);
-            var p1 = r.ReadU32();
-            var channels = r.ReadU32();
+            long basePos = s.Pos;
+
+            uint pChannelNames = r.ReadU32();
+            uint channelCount = r.ReadU32();
             skeleton_id = r.ReadU32();
-            r.expect(0, "AN001");      //< Usually zero.. always <= 10.  Maybe a count of something?
-            var p3 = r.ReadU32();
-            var p4 = r.ReadU32();
-            r.expect(channels, "AN002");
-            r.expect(0, "AN003");
+            field_C = r.ReadU32();
+            uint pChannelData = r.ReadU32();
+            uint pPaddingEnd = r.ReadU32();
+            r.ReadU32();                      // channelCount again
+            field_1C = r.ReadU32();
             length = r.ReadF32();
-            r.expect(12, "AN010");
+            field_24 = r.ReadU32();
             flags = r.ReadU32();
-            var p2 = r.ReadU32();
+            uint pChannelInfo = r.ReadU32();
 
-            if (p1 != r.Position) throw new ModelFormatException(r, "AN100", p1);
-            if (p2 != p1 + channels * 4) throw new ModelFormatException(r, "AN101", p2);
-            if (p3 != p2 + channels * 12) throw new ModelFormatException(r, "AN102", p3);
+            channels = new Channel[channelCount];
+            for (int i = 0; i < channelCount; i++) channels[i] = new Channel();
 
-            //var keyframe_count = (p4 - p3) / (channels * JointPose.size * 3);
-            uint keyframe_count = 0;
+            // p_channel_names / p_channel_info are absolute stream offsets; per-channel keyframe
+            // positions (read below) are relative to the section start (basePos).
+            r.Seek(pChannelNames, SeekOrigin.Begin);
+            for (int i = 0; i < channelCount; i++) channels[i].id = r.ReadU32();
 
-            channel_names = new UInt32[channels];
-            for (int i = 0; i < channels; i++) channel_names[i] = r.ReadU32();
-
-            for (int i = 0; i < channels; i++)
+            var positions = new uint[channelCount];
+            r.Seek(pChannelInfo, SeekOrigin.Begin);
+            for (int i = 0; i < channelCount; i++)
             {
-                var p = r.ReadU32() - (12 * 4 + channels * 4 + channels * 12);
-                var pose_size = r.ReadU32();
-                var pose_components = r.ReadU32();
-                if (pose_components != 0x601 || pose_size != JointPose.size)
-                    throw new ModelFormatException(r, "AN200 Pose format not supported", pose_components);
-                if (i == 1)
-                    keyframe_count = p / JointPose.size;
-                else if (i >= 1 && p != i * JointPose.size * keyframe_count)
-                    throw new ModelFormatException(r, "AN201", null);
+                positions[i] = r.ReadU32();
+                channels[i].poseSize = r.ReadU32();
+                channels[i].components = r.ReadU32();
             }
 
-            if (channels == 1) keyframe_count = (p4 - p3) / (channels * JointPose.size);  // Yuck!  This is just a guess.
-
-            channel_frame_pose = new JointPose[channels, keyframe_count];
-            for (int c = 0; c < channels; c++)
-                for (int f = 0; f < keyframe_count; f++)
+            // All but the last channel: keyframe count from the gap to the next channel.
+            for (int i = 0; i < channelCount - 1; i++)
+            {
+                uint stride = channels[i].poseSize != 0 ? channels[i].poseSize : (uint)Math.Max(1, PoseSizeFor(channels[i].components));
+                int count = (int)((positions[i + 1] - positions[i]) / stride);
+                r.Seek(basePos + positions[i], SeekOrigin.Begin);
+                for (int k = 0; k < count; k++) channels[i].keys.Add(ReadKey(r, channels[i].components));
+            }
+            // Last channel: read until the timestamp stops increasing.
+            if (channelCount > 0)
+            {
+                Channel last = channels[channelCount - 1];
+                r.Seek(basePos + positions[channelCount - 1], SeekOrigin.Begin);
+                float lastTime = -1f;
+                long limit = s.Pos + s.Size;
+                while (r.Position + PoseSizeFor(last.components) <= limit)
                 {
-                    channel_frame_pose[c, f].Read(r);
-                    if (channels == 1 && channel_frame_pose[c, f].time == length)
-                    {
-                        // We had to guess about the length, so now fix our guess :-(
-                        keyframe_count = (uint)f + 1;
-                        var t = new JointPose[channels, keyframe_count];
-                        for (int c1 = 0; c1 < channels; c1++)
-                            for (int f1 = 0; f1 < keyframe_count; f1++)
-                                t[c1, f1] = channel_frame_pose[c1, f1];
-                        channel_frame_pose = t;
-                        break;
-                    }
+                    Key k = ReadKey(r, last.components);
+                    if (k.time < lastTime) break;
+                    lastTime = k.time;
+                    last.keys.Add(k);
+                    if (k.time >= length) break;
                 }
+            }
+            // Leave the stream at the section end so the loader's size check passes.
+            r.Seek(s.Pos + s.Size, SeekOrigin.Begin);
+        }
 
-            padding = p4 - p3 - channels * keyframe_count * JointPose.size;
-            r.ReadPadding(padding);  //< Huge number of zeros very common
+        private static Key ReadKey(Stream r, uint components)
+        {
+            Key k = new Key { sx = 1, sy = 1, sz = 1 };
+            if (components == 0x100)   // blend factor: not a transform; keep identity, store time
+            {
+                r.ReadF32();           // factor (unused for glTF transform tracks)
+                k.time = r.ReadF32();
+                return k;
+            }
+            k.qx = r.ReadF32(); k.qy = r.ReadF32(); k.qz = r.ReadF32(); k.qw = r.ReadF32();
+            k.tx = r.ReadF32(); k.ty = r.ReadF32(); k.tz = r.ReadF32();
+            if (components == 0x601)
+            {
+                k.sx = r.ReadF32(); k.sy = r.ReadF32(); k.sz = r.ReadF32();
+                r.ReadU32();           // padding
+            }
+            k.time = r.ReadF32();
+            return k;
         }
 
         public override void Write(RW4Model m, RW4Section s, Stream w)
         {
-            var channels = (uint)channel_names.Length;
-            var keyframe_count = (uint)channel_frame_pose.GetLength(1);
-            var p1 = (uint)w.Position + 12 * 4;
+            long basePos = w.Position;
+            uint channelCount = (uint)channels.Length;
 
-            w.WriteU32(p1);
-            w.WriteU32(channels);
+            // header (12 uints); offsets are relative to basePos.
+            uint pChannelNames = 12 * 4;
+            uint pChannelInfo = pChannelNames + channelCount * 4;
+            uint pChannelData = pChannelInfo + channelCount * 12;
+
+            uint dataLen = 0;
+            for (int i = 0; i < channelCount; i++) dataLen += (uint)(channels[i].keys.Count * PoseSizeFor(channels[i].components));
+            uint pPaddingEnd = pChannelData + dataLen;
+
+            w.WriteU32(pChannelNames);
+            w.WriteU32(channelCount);
             w.WriteU32(skeleton_id);
-            w.WriteU32(0);
-            w.WriteU32(p1 + channels * 4 + channels * 12);
-            w.WriteU32(p1 + channels * 4 + channels * 12 + channels * keyframe_count * JointPose.size + padding);
-            w.WriteU32(channels);
-            w.WriteU32(0);
+            w.WriteU32(field_C);
+            w.WriteU32(pChannelData);
+            w.WriteU32(pPaddingEnd);
+            w.WriteU32(channelCount);
+            w.WriteU32(field_1C);
             w.WriteF32(length);
-            w.WriteU32(12);
+            w.WriteU32(field_24);
             w.WriteU32(flags);
-            w.WriteU32(p1 + channels * 4);
+            w.WriteU32(pChannelInfo);
 
-            w.WriteU32s(channel_names);
-            for (int i = 0; i < channels; i++)
+            foreach (Channel c in channels) w.WriteU32(c.id);
+
+            uint pos = pChannelData;
+            foreach (Channel c in channels)
             {
-                w.WriteU32((uint)(12 * 4 + channels * 4 + channels * 12 + i * JointPose.size * keyframe_count));
-                w.WriteU32(JointPose.size);
-                w.WriteU32(0x601);
+                w.WriteU32(pos);
+                w.WriteU32((uint)PoseSizeFor(c.components));
+                w.WriteU32(c.components);
+                pos += (uint)(c.keys.Count * PoseSizeFor(c.components));
             }
-            for (int c = 0; c < channels; c++)
-                for (int f = 0; f < keyframe_count; f++)
-                    channel_frame_pose[c, f].Write(w);
 
-            w.WritePadding(padding);
+            foreach (Channel c in channels)
+                foreach (Key k in c.keys) WriteKey(w, c.components, k);
+        }
+
+        private static void WriteKey(Stream w, uint components, Key k)
+        {
+            if (components == 0x100) { w.WriteF32(0); w.WriteF32(k.time); return; }
+            w.WriteF32(k.qx); w.WriteF32(k.qy); w.WriteF32(k.qz); w.WriteF32(k.qw);
+            w.WriteF32(k.tx); w.WriteF32(k.ty); w.WriteF32(k.tz);
+            if (components == 0x601) { w.WriteF32(k.sx); w.WriteF32(k.sy); w.WriteF32(k.sz); w.WriteU32(0); }
+            w.WriteF32(k.time);
         }
 
         public override int ComputeSize()
         {
-            var channels = channel_names.Length;
-            var keyframe_count = channel_frame_pose.GetLength(1);
-            return (int)(12 * 4 + channels * 4 + channels * 12 + channels * keyframe_count * JointPose.size + padding);
+            // Match the on-disk layout produced by Write (the loader verifies this).
+            uint channelCount = (uint)channels.Length;
+            int size = 12 * 4 + (int)channelCount * 4 + (int)channelCount * 12;
+            foreach (Channel c in channels) size += c.keys.Count * PoseSizeFor(c.components);
+            return size;
         }
     };
 }

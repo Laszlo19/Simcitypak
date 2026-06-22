@@ -196,12 +196,20 @@ namespace SporeMaster.RenderWare4
                              section.GetObject(this, r, out t);
                              break;
                          }
-                    /* case RW4Skeleton.type_code:
+                    case RW4Skeleton.type_code:
                           {
-                              RW4Skeleton t;
-                              section.GetObject(this, r, out t);
+                              // Skeleton pulls in its HierarchyInfo + bind matrices. Guarded so a
+                              // model with an unusual skeleton still exports (geometry only).
+                              try { RW4Skeleton t; section.GetObject(this, r, out t); }
+                              catch { }
                               break;
-                          }*/
+                          }
+                    case Anim.type_code:
+                          {
+                              try { Anim t; section.GetObject(this, r, out t); }
+                              catch { }
+                              break;
+                          }
                      case Texture.type_code:
                          {
                              Texture t;

@@ -18,7 +18,8 @@ namespace SporeMaster.RenderWare4
     /// across packages); if no resolver is given or it returns no base color, a
     /// heuristic picks the largest non-normal-map texture embedded in the model.
     ///
-    /// Still TODO: skeleton and animation (see HANDOFF.md).
+    /// Skinned models also export their skeleton: a joint node hierarchy + inverse-bind
+    /// matrices + per-vertex JOINTS_0/WEIGHTS_0 (a glTF skin). Still TODO: animation tracks.
     /// </summary>
     public class GltfConverter : IConverter
     {
@@ -40,6 +41,102 @@ namespace SporeMaster.RenderWare4
 
         public GltfConverter() { }
         public GltfConverter(Func<RW4Mesh, MaterialTextures> textureProvider) { _textureProvider = textureProvider; }
+
+        /// <summary>Skeleton + per-vertex skin binding extracted from an RW4 model, ready to
+        /// emit as a glTF skin (joint node hierarchy + inverse-bind matrices + JOINTS/WEIGHTS).</summary>
+        private class SkinData
+        {
+            public int JointCount;
+            public int[] Parent;          // per joint: parent joint index, or -1
+            public float[][] LocalTrans;  // per joint: [3] translation relative to parent
+            public float[] InverseBind;   // 16*JointCount floats, column-major 4x4 per joint
+            public ushort[] VJoints;      // 4 per vertex
+            public float[] VWeights;      // 4 per vertex
+        }
+
+        /// <summary>
+        /// Builds skin data from the model's skeleton (RW4Skeleton) and the mesh's blend
+        /// components. The inverse-bind is a pure translation (-bindPos), and joint nodes are
+        /// translation-only, so the bind pose is undeformed; the scene root carries the up-axis
+        /// rotation, which then applies uniformly to the skinned mesh. Vertices with no blend
+        /// data bind fully to joint 0. Returns null if the model has no usable skeleton.
+        /// </summary>
+        private static SkinData ExtractSkin(RW4Mesh mesh, int vCount)
+        {
+            try
+            {
+                if (mesh == null || mesh.model == null) return null;
+                RW4Skeleton skel = null;
+                foreach (RW4Section s in mesh.model.Sections) { if (s.obj is RW4Skeleton) { skel = (RW4Skeleton)s.obj; break; } }
+                if (skel == null || skel.jointInfo == null || skel.jointInfo.items == null) return null;
+                var items = skel.jointInfo.items;
+                int n = items.Length;
+                if (n == 0 || skel.mat4 == null || skel.mat4.items == null || skel.mat4.items.Length < n) return null;
+
+                var sd = new SkinData { JointCount = n, Parent = new int[n], LocalTrans = new float[n][], InverseBind = new float[16 * n] };
+                var pos = new float[n][];     // global bind position per joint (RW4 space)
+                for (int i = 0; i < n; i++)
+                {
+                    float[] m = skel.mat4.items[i].m;   // 3x3 rotation (row-major, 0-padded) + translation
+                    float t0 = m[12], t1 = m[13], t2 = m[14];
+                    // bindPos = R * (-t)  (matches the SporeModder importer)
+                    float px = -(m[0] * t0 + m[1] * t1 + m[2] * t2);
+                    float py = -(m[4] * t0 + m[5] * t1 + m[6] * t2);
+                    float pz = -(m[8] * t0 + m[9] * t1 + m[10] * t2);
+                    pos[i] = new[] { px, py, pz };
+                    sd.Parent[i] = items[i].parent == null ? -1 : items[i].parent.index;
+                    // inverse-bind = translate(-bindPos), column-major
+                    int o = i * 16;
+                    sd.InverseBind[o + 0] = 1; sd.InverseBind[o + 5] = 1; sd.InverseBind[o + 10] = 1; sd.InverseBind[o + 15] = 1;
+                    sd.InverseBind[o + 12] = -px; sd.InverseBind[o + 13] = -py; sd.InverseBind[o + 14] = -pz;
+                }
+                for (int i = 0; i < n; i++)
+                {
+                    int p = sd.Parent[i];
+                    sd.LocalTrans[i] = p < 0
+                        ? new[] { pos[i][0], pos[i][1], pos[i][2] }
+                        : new[] { pos[i][0] - pos[p][0], pos[i][1] - pos[p][1], pos[i][2] - pos[p][2] };
+                }
+
+                // per-vertex joints + weights
+                sd.VJoints = new ushort[vCount * 4];
+                sd.VWeights = new float[vCount * 4];
+                var verts = mesh.vertices.vertices;
+                for (int v = 0; v < vCount; v++)
+                {
+                    ushort[] idx = { 0, 0, 0, 0 };
+                    float[] wt = { 0, 0, 0, 0 };
+                    bool gotIdx = false, gotWt = false;
+                    if (verts[v].VertexComponents != null)
+                        foreach (var c in verts[v].VertexComponents)
+                        {
+                            if (c.Usage == D3DDECLUSAGE.D3DDECLUSAGE_BLENDINDICES) { ReadQuadU(c, idx, n); gotIdx = true; }
+                            else if (c.Usage == D3DDECLUSAGE.D3DDECLUSAGE_BLENDWEIGHT) { ReadQuadF(c, wt); gotWt = true; }
+                        }
+                    if (!gotIdx) { idx[0] = 0; }
+                    if (!gotWt) { wt[0] = 1; wt[1] = wt[2] = wt[3] = 0; }
+                    float sum = wt[0] + wt[1] + wt[2] + wt[3];
+                    if (sum <= 0.0001f) { wt[0] = 1; sum = 1; }
+                    for (int k = 0; k < 4; k++) { sd.VJoints[v * 4 + k] = idx[k]; sd.VWeights[v * 4 + k] = wt[k] / sum; }
+                }
+                return sd;
+            }
+            catch { return null; }
+        }
+
+        private static void ReadQuadU(IVertexComponentValue c, ushort[] outv, int jointCount)
+        {
+            var u = c as VertexUByte4Value; if (u != null) { outv[0] = u.X; outv[1] = u.Y; outv[2] = u.Z; outv[3] = u.W; }
+            else { var s = c as VertexShort4Value; if (s != null) { outv[0] = (ushort)s.X; outv[1] = (ushort)s.Y; outv[2] = (ushort)s.Z; outv[3] = (ushort)s.W; } }
+            for (int k = 0; k < 4; k++) if (outv[k] >= jointCount) outv[k] = 0;   // clamp stray indices
+        }
+
+        private static void ReadQuadF(IVertexComponentValue c, float[] outv)
+        {
+            var u = c as VertexUByte4Value; if (u != null) { outv[0] = u.X / 255f; outv[1] = u.Y / 255f; outv[2] = u.Z / 255f; outv[3] = u.W / 255f; return; }
+            var f = c as VertexFloat4Value; if (f != null) { outv[0] = f.X; outv[1] = f.Y; outv[2] = f.Z; outv[3] = f.W; return; }
+            var sn = c as VertexShort4NValue; if (sn != null) { outv[0] = (float)sn.X; outv[1] = (float)sn.Y; outv[2] = (float)sn.Z; outv[3] = (float)sn.W; return; }
+        }
 
         private const uint GLB_MAGIC = 0x46546C67;   // "glTF"
         private const uint GLB_VERSION = 2;
@@ -132,12 +229,26 @@ namespace SporeMaster.RenderWare4
                 int normalImg = addImage(normalPng);
                 int specImg = addImage(specPng);
 
+                // Optional skin: JOINTS_0 (ushort vec4), WEIGHTS_0 (float vec4), inverse-bind
+                // matrices (float mat4 per joint).
+                SkinData skin = ExtractSkin(mesh, vCount);
+                int jointsOffset = -1, weightsOffset = -1, ibmOffset = -1;
+                if (skin != null)
+                {
+                    Pad4(bw, bin); jointsOffset = (int)bin.Position;
+                    for (int i = 0; i < vCount * 4; i++) bw.Write(skin.VJoints[i]);
+                    Pad4(bw, bin); weightsOffset = (int)bin.Position;
+                    for (int i = 0; i < vCount * 4; i++) bw.Write(skin.VWeights[i]);
+                    Pad4(bw, bin); ibmOffset = (int)bin.Position;
+                    for (int i = 0; i < skin.InverseBind.Length; i++) bw.Write(skin.InverseBind[i]);
+                }
+
                 bw.Flush();
                 byte[] binData = bin.ToArray();
 
                 string json = BuildJson(vCount, idxCount, posOffset, posLen, normOffset, normLen,
                     uvOffset, uvLen, idxOffset, idxLen, imgSpans, baseImg, normalImg, specImg,
-                    binData.Length, min, max);
+                    binData.Length, min, max, skin, jointsOffset, weightsOffset, ibmOffset);
 
                 WriteGlb(fileName, json, binData);
             }
@@ -149,14 +260,18 @@ namespace SporeMaster.RenderWare4
             for (int i = 0; i < pad; i++) bw.Write((byte)0);
         }
 
+        private const int COMP_USHORT = 5123;
+
         private static string BuildJson(int vCount, int idxCount,
             int posOffset, int posLen, int normOffset, int normLen,
             int uvOffset, int uvLen, int idxOffset, int idxLen,
             List<int[]> imgSpans, int baseImg, int normalImg, int specImg,
-            int bufferLength, float[] min, float[] max)
+            int bufferLength, float[] min, float[] max,
+            SkinData skin, int jointsOffset, int weightsOffset, int ibmOffset)
         {
             int nImages = imgSpans.Count;
             bool hasMaterial = nImages > 0;
+            bool hasSkin = skin != null;
 
             var bufferViews = new List<object>
             {
@@ -165,6 +280,34 @@ namespace SporeMaster.RenderWare4
                 new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = uvOffset,   ["byteLength"] = uvLen,   ["target"] = TARGET_ARRAY },
                 new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = idxOffset,  ["byteLength"] = idxLen,  ["target"] = TARGET_ELEMENT }
             };
+            var accessors = new List<object>
+            {
+                new Dictionary<string, object> { ["bufferView"] = 0, ["componentType"] = COMP_FLOAT, ["count"] = vCount, ["type"] = "VEC3",
+                    ["min"] = new object[] { min[0], min[1], min[2] }, ["max"] = new object[] { max[0], max[1], max[2] } },
+                new Dictionary<string, object> { ["bufferView"] = 1, ["componentType"] = COMP_FLOAT, ["count"] = vCount, ["type"] = "VEC3" },
+                new Dictionary<string, object> { ["bufferView"] = 2, ["componentType"] = COMP_FLOAT, ["count"] = vCount, ["type"] = "VEC2" },
+                new Dictionary<string, object> { ["bufferView"] = 3, ["componentType"] = COMP_UINT,  ["count"] = idxCount, ["type"] = "SCALAR" }
+            };
+
+            var primitiveAttrs = new Dictionary<string, object> { ["POSITION"] = 0, ["NORMAL"] = 1, ["TEXCOORD_0"] = 2 };
+
+            // skin accessors/bufferViews (JOINTS_0, WEIGHTS_0, inverse-bind matrices)
+            int jointsAcc = -1, weightsAcc = -1, ibmAcc = -1;
+            if (hasSkin)
+            {
+                int bvJ = bufferViews.Count;
+                bufferViews.Add(new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = jointsOffset, ["byteLength"] = vCount * 8, ["target"] = TARGET_ARRAY });
+                int bvW = bufferViews.Count;
+                bufferViews.Add(new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = weightsOffset, ["byteLength"] = vCount * 16, ["target"] = TARGET_ARRAY });
+                int bvIbm = bufferViews.Count;
+                bufferViews.Add(new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = ibmOffset, ["byteLength"] = skin.JointCount * 64 });
+                jointsAcc = accessors.Count; accessors.Add(new Dictionary<string, object> { ["bufferView"] = bvJ, ["componentType"] = COMP_USHORT, ["count"] = vCount, ["type"] = "VEC4" });
+                weightsAcc = accessors.Count; accessors.Add(new Dictionary<string, object> { ["bufferView"] = bvW, ["componentType"] = COMP_FLOAT, ["count"] = vCount, ["type"] = "VEC4" });
+                ibmAcc = accessors.Count; accessors.Add(new Dictionary<string, object> { ["bufferView"] = bvIbm, ["componentType"] = COMP_FLOAT, ["count"] = skin.JointCount, ["type"] = "MAT4" });
+                primitiveAttrs["JOINTS_0"] = jointsAcc;
+                primitiveAttrs["WEIGHTS_0"] = weightsAcc;
+            }
+
             // one bufferView + image + texture per embedded PNG; texture index == image index
             var images = new List<object>();
             var textures = new List<object>();
@@ -178,36 +321,61 @@ namespace SporeMaster.RenderWare4
 
             var primitive = new Dictionary<string, object>
             {
-                ["attributes"] = new Dictionary<string, object> { ["POSITION"] = 0, ["NORMAL"] = 1, ["TEXCOORD_0"] = 2 },
+                ["attributes"] = primitiveAttrs,
                 ["indices"] = 3,
                 ["mode"] = MODE_TRIANGLES
             };
             if (hasMaterial) primitive["material"] = 0;
 
+            // ----- node graph -----
+            // A root node carries the Z-up -> Y-up correction (-90° about X). For a skinned mesh
+            // the joints hang off the root (so the rotation applies uniformly) and the mesh node
+            // references the skin; for a static mesh the root just holds the mesh.
+            object[] upRotation = new object[] { -0.70710678, 0.0, 0.0, 0.70710678 };
+            var nodes = new List<object>();
+            object[] sceneNodes;
+            object[] gltfSkin = null;
+            if (hasSkin)
+            {
+                int meshNodeIdx = 1;          // 0 = root, 1 = mesh
+                int jointBase = 2;            // joints start at node index 2
+                var rootChildren = new List<object> { meshNodeIdx };
+                for (int i = 0; i < skin.JointCount; i++) if (skin.Parent[i] < 0) rootChildren.Add(jointBase + i);
+                nodes.Add(new Dictionary<string, object> { ["rotation"] = upRotation, ["children"] = rootChildren.ToArray() }); // 0 root
+                nodes.Add(new Dictionary<string, object> { ["mesh"] = 0, ["skin"] = 0 });                                       // 1 mesh
+                for (int i = 0; i < skin.JointCount; i++)
+                {
+                    var jn = new Dictionary<string, object> { ["translation"] = new object[] { skin.LocalTrans[i][0], skin.LocalTrans[i][1], skin.LocalTrans[i][2] } };
+                    var kids = new List<object>();
+                    for (int c = 0; c < skin.JointCount; c++) if (skin.Parent[c] == i) kids.Add(jointBase + c);
+                    if (kids.Count > 0) jn["children"] = kids.ToArray();
+                    jn["name"] = "joint" + i;
+                    nodes.Add(jn);
+                }
+                var jointList = new object[skin.JointCount];
+                for (int i = 0; i < skin.JointCount; i++) jointList[i] = jointBase + i;
+                int firstRoot = 0; for (int i = 0; i < skin.JointCount; i++) if (skin.Parent[i] < 0) { firstRoot = i; break; }
+                gltfSkin = new object[] { new Dictionary<string, object> { ["inverseBindMatrices"] = ibmAcc, ["joints"] = jointList, ["skeleton"] = jointBase + firstRoot } };
+                sceneNodes = new object[] { 0 };
+            }
+            else
+            {
+                nodes.Add(new Dictionary<string, object> { ["mesh"] = 0, ["rotation"] = upRotation });
+                sceneNodes = new object[] { 0 };
+            }
+
             var gltf = new Dictionary<string, object>
             {
                 ["asset"] = new Dictionary<string, object> { ["version"] = "2.0", ["generator"] = "SimCityPak glTF exporter" },
                 ["scene"] = 0,
-                ["scenes"] = new object[] { new Dictionary<string, object> { ["nodes"] = new object[] { 0 } } },
-                // Rotate -90° about X so RW4's Z-up geometry stands upright in glTF's
-                // Y-up world (otherwise models lie on their side). Quaternion [x,y,z,w].
-                ["nodes"] = new object[] { new Dictionary<string, object>
-                    {
-                        ["mesh"] = 0,
-                        ["rotation"] = new object[] { -0.70710678, 0.0, 0.0, 0.70710678 }
-                    } },
+                ["scenes"] = new object[] { new Dictionary<string, object> { ["nodes"] = sceneNodes } },
+                ["nodes"] = nodes.ToArray(),
                 ["meshes"] = new object[] { new Dictionary<string, object> { ["primitives"] = new object[] { primitive } } },
                 ["buffers"] = new object[] { new Dictionary<string, object> { ["byteLength"] = bufferLength } },
                 ["bufferViews"] = bufferViews.ToArray(),
-                ["accessors"] = new object[]
-                {
-                    new Dictionary<string, object> { ["bufferView"] = 0, ["componentType"] = COMP_FLOAT, ["count"] = vCount, ["type"] = "VEC3",
-                        ["min"] = new object[] { min[0], min[1], min[2] }, ["max"] = new object[] { max[0], max[1], max[2] } },
-                    new Dictionary<string, object> { ["bufferView"] = 1, ["componentType"] = COMP_FLOAT, ["count"] = vCount, ["type"] = "VEC3" },
-                    new Dictionary<string, object> { ["bufferView"] = 2, ["componentType"] = COMP_FLOAT, ["count"] = vCount, ["type"] = "VEC2" },
-                    new Dictionary<string, object> { ["bufferView"] = 3, ["componentType"] = COMP_UINT,  ["count"] = idxCount, ["type"] = "SCALAR" }
-                }
+                ["accessors"] = accessors.ToArray()
             };
+            if (hasSkin) gltf["skins"] = gltfSkin;
 
             if (hasMaterial)
             {
