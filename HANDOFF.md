@@ -136,6 +136,32 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     flat) confirmed by extracting+viewing the PNG, KHR_materials_specular declared in extensionsUsed.
     TODO on the .glb: DXT-compressed raster images (pixFmt != 21), .obj/.mtl textures, skeleton,
     animation. export-obj is untextured (no .mtl emitted).
+
+    **KNOWN LIMITATION — base color looks "neon/false-colour" for many buildings.** Investigated
+    from a user report (models render as green/red/magenta checkerboards). Root cause: SimCity
+    buildings have **no baked albedo**. The material's slots are: u1=0 a small (e.g. 94x4) HDR
+    **palette** strip (D3DFMT_A16B16G16R16F = textureType 116, which the headless decoder doesn't
+    handle), u1=1 a **region/zone mask** (the neon false-colour atlas — what we currently export as
+    base color), u1=2 the **normal** map, u1=3 a secondary mask. The game composites the final
+    facade colour at runtime as roughly `palette[region]`. Reproducing it needs facade-palette
+    compositing (decode the half-float palette + map the zone atlas's region channel through it) —
+    a real, separate feature, not yet done. The neon export is the raw region atlas.
+    Also note: many buildings legitimately **share** the same base + normal atlas (e.g. 18 EP1
+    models share base 0x1188b12e / normal 0xa3791e5c) — that's correct (shared atlases indexed by
+    per-model UVs + per-model palette), NOT a bug, even though it looks like "every model has the
+    same texture".
+
+    **Robustness fixes (done):** meshes without FLOAT4 texcoords used to throw in
+    `Vertex.TextureCoordinates` (`.First()`), failing ~34 models in a full EP1 export; `Vertex`
+    now exposes `HasTextureCoordinates` and `Normal` is null-safe, and `GltfConverter` exports
+    geometry-only (no UVs/material) when texcoords are absent — EP1 failures dropped 34 -> 6. The
+    remaining 6 are a pre-existing parser NRE in `RW4Material.Read` (undecoded `VertexFormat`
+    section); the whole model fails to load. Localized-name coverage: `BuildLocaleNameMap` now
+    propagates a catalog prop's name to the RW4 models referenced by props sharing its instance or
+    sitting at its Model-Details target (asset-group aware, via `PropRec`/`CollectModelRefs`), and
+    the GUI summary now reports "N of M models got a localized name" instead of the misleading map
+    size. NOTE coverage is inherently limited (~364/1025 on EP1): most exported meshes are LOD
+    variants / sub-models / shared texture resources not tied to a named catalog entry.
   - `export-texture <input> <outputDir>` — RW4 Texture sections (type 0x20003) → .dds files.
     Added `Texture.SaveDds(path)` in `RenderWare4\Texture.cs` — writes the DDS magic+header
     (same header ToImage() builds) + the raw block-compressed blob, WITHOUT the GraphicsDevice
