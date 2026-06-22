@@ -80,7 +80,10 @@ namespace SimCityPak.Cli
                     case "export-obj":
                         return RunExportModels(args, ".obj", (m, p) => m.Export(p));
                     case "export-gltf":
-                        return RunExportModels(args, ".glb", (m, p) => new GltfConverter().Export(m, p));
+                    {
+                        var texLookup = BuildTextureLookupForInput(args.Length > 1 ? args[1] : "", args);
+                        return RunExportModels(args, ".glb", (m, p) => new GltfConverter(mesh => ResolveDiffusePng(mesh, texLookup)).Export(m, p));
+                    }
                     case "export-texture":
                         return RunExportTextures(args);
                     case "export-prop":
@@ -119,7 +122,9 @@ namespace SimCityPak.Cli
             Console.WriteLine("    - a single file    -> exports just that one");
             Console.WriteLine();
             Console.WriteLine("  export-obj     : RW4 models   -> Wavefront .obj  (<name>[_meshN].obj)");
-            Console.WriteLine("  export-gltf    : RW4 models   -> binary glTF .glb (<name>[_meshN].glb)");
+            Console.WriteLine("  export-gltf    : RW4 models   -> binary glTF .glb (<name>[_meshN].glb),");
+            Console.WriteLine("                   with the model's diffuse texture resolved from its material");
+            Console.WriteLine("                   (searches sibling packages; override with --textures <pkg|dir>)");
             Console.WriteLine("  export-texture : RW4 textures -> images (--format png|jpg|tga|dds, default png)");
             Console.WriteLine("  export-prop    : .prop property lists -> readable .txt (or .json with --json),");
             Console.WriteLine("                   property names resolved; --combine merges an asset's model +");
@@ -212,6 +217,164 @@ namespace SimCityPak.Cli
             Console.WriteLine("Output: " + Path.GetFullPath(outDir));
             return fails > 0 ? 1 : 0;
         }
+
+        // ----- texture resolution (for textured model export) ---------------
+
+        // SimCity stores textures as separate resources, referenced from a model's
+        // RW4Material by instance id: RW4-wrapped textures share the model type id
+        // (0x2f4e681b); raster images use 0x2f4e681c. They often live in OTHER
+        // packages (SimCity_Graphics, ...), so we index across packages.
+        private const uint TEX_RASTER_TYPE_ID = 0x2f4e681c;
+
+        /// <summary>
+        /// instanceId -> resource, for every texture-bearing resource in <paramref name="indices"/>
+        /// (RW4 image / raster image). Used to resolve a model's material texture references.
+        /// </summary>
+        private static Dictionary<uint, DatabaseIndex> BuildTextureLookup(IEnumerable<DatabaseIndex> indices)
+        {
+            var map = new Dictionary<uint, DatabaseIndex>();
+            foreach (DatabaseIndex idx in indices)
+            {
+                if (idx.TypeId != RW4_MODEL_TYPE_ID && idx.TypeId != TEX_RASTER_TYPE_ID) continue;
+                if (!map.ContainsKey(idx.InstanceId)) map[idx.InstanceId] = idx;
+            }
+            return map;
+        }
+
+        /// <summary>
+        /// Texture lookup for a .package CLI input: the input package PLUS every other
+        /// .package beside it (so textures stored in the shared graphics packages resolve).
+        /// A <c>--textures &lt;package|folder&gt;</c> argument overrides the search location.
+        /// Returns null when there's no package context (folder/loose-file input).
+        /// </summary>
+        private static Dictionary<uint, DatabaseIndex> BuildTextureLookupForInput(string input, string[] args)
+        {
+            var searchFiles = new List<string>();
+            string overridePath = null;
+            for (int i = 0; i < args.Length - 1; i++)
+                if (args[i].Equals("--textures", StringComparison.OrdinalIgnoreCase)) overridePath = args[i + 1];
+
+            if (overridePath != null)
+            {
+                if (Directory.Exists(overridePath)) searchFiles.AddRange(Directory.GetFiles(overridePath, "*.package"));
+                else if (File.Exists(overridePath)) searchFiles.Add(overridePath);
+            }
+            else if (input.EndsWith(".package", StringComparison.OrdinalIgnoreCase) && File.Exists(input))
+            {
+                string dir = Path.GetDirectoryName(Path.GetFullPath(input));
+                if (dir != null) searchFiles.AddRange(Directory.GetFiles(dir, "*.package"));
+            }
+            if (searchFiles.Count == 0) return null;
+
+            var map = new Dictionary<uint, DatabaseIndex>();
+            foreach (string pf in searchFiles)
+            {
+                try
+                {
+                    foreach (var kv in BuildTextureLookup(DatabasePackedFile.LoadFromFile(pf).Indices))
+                        if (!map.ContainsKey(kv.Key)) map[kv.Key] = kv.Value;
+                }
+                catch (Exception ex) { Logger.Exception("texture index " + Path.GetFileName(pf), ex); }
+            }
+            Console.WriteLine("(indexed " + map.Count + " textures across " + searchFiles.Count + " package(s) for material resolution)");
+            return map;
+        }
+
+        /// <summary>
+        /// Resolves a mesh's diffuse texture as PNG bytes via its model's RW4Material
+        /// texture references, decoding the referenced resources (RW4 DXT or raw raster)
+        /// and choosing the largest non-normal-map candidate. Returns null if none resolve
+        /// (the caller then falls back to the internal-texture heuristic). Never throws.
+        /// </summary>
+        private static byte[] ResolveDiffusePng(RW4Mesh mesh, Dictionary<uint, DatabaseIndex> lookup)
+        {
+            try
+            {
+                if (lookup == null || mesh == null || mesh.model == null) return null;
+
+                byte[] bestRgba = null, fallbackRgba = null;
+                int bestW = 0, bestH = 0, fbW = 0, fbH = 0;
+                long bestArea = -1, fbArea = -1;
+
+                foreach (RW4Section s in mesh.model.Sections)
+                {
+                    RW4Material mat = s.obj as RW4Material;
+                    if (mat == null || mat.Materials == null) continue;
+                    foreach (MaterialTextureReference mr in mat.Materials)
+                    {
+                        DatabaseIndex tdi;
+                        if (mr.TextureInstanceId == 0) continue;
+                        if (!lookup.TryGetValue(mr.TextureInstanceId, out tdi)) continue;
+                        int w, h;
+                        byte[] rgba = DecodeTextureResourceRgba(tdi, out w, out h);
+                        if (rgba == null) continue;
+                        // ignore strips/atlases (tiny dimensions) as a diffuse base color
+                        if (w < 16 || h < 16) continue;
+                        long area = (long)w * h;
+                        if (area > fbArea) { fallbackRgba = rgba; fbW = w; fbH = h; fbArea = area; }
+                        if (GltfConverter.LooksLikeNormalMap(rgba)) continue;
+                        if (area > bestArea) { bestRgba = rgba; bestW = w; bestH = h; bestArea = area; }
+                    }
+                }
+                if (bestRgba != null) return GltfConverter.RgbaToPng(bestRgba, bestW, bestH);
+                if (fallbackRgba != null) return GltfConverter.RgbaToPng(fallbackRgba, fbW, fbH);
+                return null;
+            }
+            catch (Exception ex) { Logger.Exception("ResolveDiffusePng", ex); return null; }
+        }
+
+        /// <summary>Decodes a texture resource (RW4-wrapped DXT texture or a raw raster
+        /// image, the two SimCity texture containers) to RGBA. Returns null if unsupported.</summary>
+        private static byte[] DecodeTextureResourceRgba(DatabaseIndex tdi, out int w, out int h)
+        {
+            w = 0; h = 0;
+            byte[] data = tdi.GetIndexData(true);
+            if (tdi.TypeId == TEX_RASTER_TYPE_ID)
+            {
+                // raster header: 6 big-endian uints, then per mip [u32 blockSize][RGBA bytes].
+                if (data.Length < 28) return null;
+                uint rw = BE(data, 4), rh = BE(data, 8), pixFmt = BE(data, 20);
+                if (pixFmt != 21) return null;               // only raw RGBA rasters are headless-decodable
+                uint blockSize = BE(data, 24);
+                if (rw == 0 || rh == 0 || 28L + blockSize > data.Length) return null;
+                w = (int)rw; h = (int)rh;
+                byte[] rgba = new byte[w * h * 4];
+                Array.Copy(data, 28, rgba, 0, Math.Min(rgba.Length, (int)blockSize));   // stored R,G,B,A
+                return rgba;
+            }
+            // RW4-wrapped texture: find its Texture section and DXT-decode it.
+            var model = new RW4Model();
+            using (var ms = new MemoryStream(data)) model.Read(ms);
+            var texSec = model.Sections.FirstOrDefault(x => x.TypeCode == SectionTypeCodes.Texture && x.obj is Texture);
+            if (texSec == null) return null;
+            using (var bmp = GltfConverter.DecodeTextureToBitmap((Texture)texSec.obj))
+            {
+                if (bmp == null) return null;
+                w = bmp.Width; h = bmp.Height;
+                return BitmapToRgba(bmp);
+            }
+        }
+
+        private static byte[] BitmapToRgba(System.Drawing.Bitmap bmp)
+        {
+            int w = bmp.Width, h = bmp.Height;
+            var rect = new System.Drawing.Rectangle(0, 0, w, h);
+            var bd = bmp.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            byte[] bgra = new byte[w * h * 4];
+            System.Runtime.InteropServices.Marshal.Copy(bd.Scan0, bgra, 0, bgra.Length);
+            bmp.UnlockBits(bd);
+            byte[] rgba = new byte[w * h * 4];
+            for (int i = 0; i < w * h; i++)
+            {
+                rgba[i * 4 + 0] = bgra[i * 4 + 2];
+                rgba[i * 4 + 1] = bgra[i * 4 + 1];
+                rgba[i * 4 + 2] = bgra[i * 4 + 0];
+                rgba[i * 4 + 3] = bgra[i * 4 + 3];
+            }
+            return rgba;
+        }
+
+        private static uint BE(byte[] b, int o) { return (uint)((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]); }
 
         /// <summary>
         /// Parses RW4 bytes and writes each Mesh section via <paramref name="exporter"/>.
@@ -868,11 +1031,12 @@ namespace SimCityPak.Cli
             string outDir = args[2];
             Directory.CreateDirectory(outDir);
             string format = GetTextureFormat(args);
+            var texLookup = BuildTextureLookupForInput(input, args);
 
             int glb = 0, tex = 0, fails = 0;
             Action<byte[], string> handle = (data, baseName) =>
             {
-                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter().Export(m, p)); }
+                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter(mesh => ResolveDiffusePng(mesh, texLookup)).Export(m, p)); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all model " + baseName, ex); Console.WriteLine("FAIL " + baseName + " (model) :: " + ex.Message); }
                 try { tex += ExportRw4Textures(data, outDir, baseName, format); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all textures " + baseName, ex); Console.WriteLine("FAIL " + baseName + " (textures) :: " + ex.Message); }
@@ -925,6 +1089,9 @@ namespace SimCityPak.Cli
             Directory.CreateDirectory(outDir);
             Logger.Info("Export-all -> " + outDir + " (textures: " + format + ")" + (string.IsNullOrEmpty(localeFile) ? "" : " (locale: " + localeFile + ")"));
             var nameMap = BuildLocaleNameMap(indices, localeFile);
+            // Resolve model materials against every texture in the supplied resources
+            // (for the GUI that's all loaded packages, so shared graphics textures apply).
+            var texLookup = BuildTextureLookup(indices);
             var used = new HashSet<string>();
             int glb = 0, tex = 0, fails = 0;
             foreach (DatabaseIndex index in indices)
@@ -936,7 +1103,7 @@ namespace SimCityPak.Cli
                 byte[] data;
                 try { data = index.GetIndexData(true); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all read " + baseName, ex); continue; }
-                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter().Export(m, p)); }
+                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter(mesh => ResolveDiffusePng(mesh, texLookup)).Export(m, p)); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all model " + baseName, ex); }
                 try { tex += ExportRw4Textures(data, outDir, baseName, format); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all textures " + baseName, ex); }

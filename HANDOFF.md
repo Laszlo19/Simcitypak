@@ -94,14 +94,36 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     avgRGB is a natural diffuse colour, not (128,128,255). Two model commands share
     `RunExportModels(args, ext, exporter)` in CliRunner.
 
-    **Per-mesh textures investigation (done):** all 563 models are SINGLE-mesh (verified by
-    exporting all and finding zero `_mesh1` files), so per-mesh == per-model here. The
-    authoritative chain Mesh -> `RWMeshMaterialAssignment`(0x2001a) -> `RW4TexMetadata`(0x2000b)
-    -> Texture EXISTS in the format but is NOT usable: `RW4Model.Read` leaves 0x2001a parsing
-    commented out, and 0x2000b is parsed as `RW4Material` while the assignment wants
-    `RW4TexMetadata` — `RW4Section.GetObject` caches one obj per section so the cast throws
-    (that's why it's disabled). Enabling it needs real parser surgery; hence the heuristic.
-    TODO on the .glb: raw-bitmap (type 21) textures, normal/spec maps, skeleton, animation.
+    **Material-resolved textures (done — the real fix):** the heuristic above usually FAILS for
+    SimCity buildings because a model's *internal* Texture section is a 2x2 placeholder; the real
+    texture lives in a SEPARATE resource referenced by the model's `RW4Material` (section 0x2000b,
+    parsed as `RW4Material` with up to 6 `MaterialTextureReference`s, each a `TextureInstanceId` +
+    slot byte `Unknown1`). Those texture resources usually live in OTHER packages
+    (`SimCity_Graphics` etc.) and come in two containers: **RW4-wrapped** (type id `0x2f4e681b`,
+    same as models — a 0-mesh RW4 with a `Texture` section, often DXT) and **raster image**
+    (`0x2f4e681c` — header of 6 big-endian uints then per-mip `[u32 blockSize][RGBA]`; only
+    `pixFmt==21` raw RGBA is headless-decodable). Slots: `Unknown1==0x2d` is the shader def, then
+    0,1,2,3,4 are texture slots (slot 0 is often a tiny facade strip, the 256x256 albedo/normal/
+    spec are other slots). Implementation in `CliRunner.cs`:
+      * `GltfConverter` now takes an optional `Func<RW4Mesh,byte[]> diffuseProvider`; if it returns
+        a PNG that's used as base color, else it falls back to the internal-texture heuristic.
+      * `BuildTextureLookup(indices)` indexes instanceId -> texture resource; `BuildTextureLookupForInput`
+        scans the input .package PLUS every sibling .package (override: `--textures <pkg|dir>`).
+      * `ResolveDiffusePng(mesh, lookup)` walks the model's `RW4Material` refs, decodes each via
+        `DecodeTextureResourceRgba` (RW4 DXT via `GltfConverter.DecodeTextureToBitmap`; raw raster
+        directly), skips tiny strips (<16px), and picks the largest non-normal-map candidate.
+      * Wired into CLI `export-gltf` + `export-all` (sibling-package lookup) and the shared
+        `ExportAllToFolder` (used by the GUI *File ▸ Export all* — lookup built from ALL loaded
+        packages, so load the graphics packages for textures to resolve in the GUI). All headless
+        (no GraphicsDevice), so it runs on the GUI's background export Task fine.
+    Validated: DLC0 buildings + Central Train Station now embed real 256x256 diffuse PNGs (natural
+    avg RGB, not the 2x2 placeholder), confirmed by parsing the GLB. NOTE the old authoritative
+    chain Mesh -> `RWMeshMaterialAssignment`(0x2001a) -> `RW4TexMetadata`(0x2000b) is a Spore-ism
+    and is NOT how SimCity links textures (it's `RW4Material` + external instance ids); 0x2001a
+    stays disabled.
+    TODO on the .glb: normal/specular maps as glTF normalTexture/metallicRoughness, DXT-compressed
+    raster images (pixFmt != 21), .obj/.mtl textures, skeleton, animation. export-obj is untextured
+    (no .mtl emitted).
   - `export-texture <input> <outputDir>` — RW4 Texture sections (type 0x20003) → .dds files.
     Added `Texture.SaveDds(path)` in `RenderWare4\Texture.cs` — writes the DDS magic+header
     (same header ToImage() builds) + the raw block-compressed blob, WITHOUT the GraphicsDevice
