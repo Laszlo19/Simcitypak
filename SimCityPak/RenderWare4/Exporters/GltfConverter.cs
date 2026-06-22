@@ -12,26 +12,34 @@ namespace SporeMaster.RenderWare4
     /// <summary>
     /// Exports an RW4 mesh to a self-contained binary glTF 2.0 file (.glb):
     /// positions + normals + texture coordinates + triangle indices, plus the
-    /// model's diffuse texture (decoded to PNG) as the base color of a single
-    /// material. The diffuse is supplied by an optional resolver callback (which
-    /// looks up the model's RW4Material texture references across packages); if no
-    /// resolver is given or it returns null, a heuristic picks the largest
-    /// non-normal-map texture embedded in the model itself.
+    /// model's textures as a PBR material — base color, normal map, and a
+    /// specular map (KHR_materials_specular). The maps are supplied by an optional
+    /// resolver callback (which looks up the model's RW4Material texture references
+    /// across packages); if no resolver is given or it returns no base color, a
+    /// heuristic picks the largest non-normal-map texture embedded in the model.
     ///
-    /// Still TODO: normal/specular maps, skeleton and animation (see HANDOFF.md).
+    /// Still TODO: skeleton and animation (see HANDOFF.md).
     /// </summary>
     public class GltfConverter : IConverter
     {
+        /// <summary>The set of PBR maps for a mesh, as PNG bytes (any may be null).</summary>
+        public class MaterialTextures
+        {
+            public byte[] BaseColor;   // -> pbrMetallicRoughness.baseColorTexture
+            public byte[] Normal;      // -> material.normalTexture (glTF convention, flat = 128,128,255)
+            public byte[] Specular;    // -> KHR_materials_specular.specularColorTexture (RGB)
+        }
+
         /// <summary>
-        /// Optional callback that returns the diffuse texture for a mesh as PNG bytes
-        /// (or null). When set, it takes priority over the internal-texture heuristic;
-        /// it lets the caller resolve the model's RW4Material texture references against
-        /// other loaded packages (the real SimCity textures live outside the model).
+        /// Optional callback that returns the texture maps for a mesh (or null). When set it
+        /// takes priority over the internal-texture heuristic; it lets the caller resolve the
+        /// model's RW4Material texture references against other loaded packages (the real
+        /// SimCity textures live outside the model).
         /// </summary>
-        private readonly Func<RW4Mesh, byte[]> _diffuseProvider;
+        private readonly Func<RW4Mesh, MaterialTextures> _textureProvider;
 
         public GltfConverter() { }
-        public GltfConverter(Func<RW4Mesh, byte[]> diffuseProvider) { _diffuseProvider = diffuseProvider; }
+        public GltfConverter(Func<RW4Mesh, MaterialTextures> textureProvider) { _textureProvider = textureProvider; }
 
         private const uint GLB_MAGIC = 0x46546C67;   // "glTF"
         private const uint GLB_VERSION = 2;
@@ -56,10 +64,13 @@ namespace SporeMaster.RenderWare4
             int vCount = verts.Length;
 
             // Prefer the caller's resolver (RW4Material -> external texture resources);
-            // fall back to the internal-texture heuristic.
-            byte[] png = null;
-            if (_diffuseProvider != null) { try { png = _diffuseProvider(mesh); } catch { png = null; } }
-            if (png == null) png = TryGetDiffusePng(mesh);   // null if no usable texture
+            // fall back to the internal-texture heuristic for the base color.
+            MaterialTextures tex = null;
+            if (_textureProvider != null) { try { tex = _textureProvider(mesh); } catch { tex = null; } }
+            byte[] basePng = tex != null ? tex.BaseColor : null;
+            if (basePng == null) basePng = TryGetDiffusePng(mesh);   // null if no usable texture
+            byte[] normalPng = tex != null ? tex.Normal : null;
+            byte[] specPng = tex != null ? tex.Specular : null;
 
             using (var bin = new MemoryStream())
             using (var bw = new BinaryWriter(bin))
@@ -93,21 +104,28 @@ namespace SporeMaster.RenderWare4
                 }
                 int idxLen = idxCount * 4;
 
-                // Optional embedded image (PNG), 4-byte aligned
-                int imgOffset = -1, imgLen = 0;
-                if (png != null)
+                // Optional embedded images (PNG), each 4-byte aligned. Records (offset,len)
+                // per map so BuildJson can wire base color / normal / specular textures.
+                var imgSpans = new List<int[]>();   // [offset, length] in bin
+                Func<byte[], int> addImage = data =>
                 {
+                    if (data == null) return -1;
                     Pad4(bw, bin);
-                    imgOffset = (int)bin.Position;
-                    bw.Write(png);
-                    imgLen = png.Length;
-                }
+                    int off = (int)bin.Position;
+                    bw.Write(data);
+                    imgSpans.Add(new[] { off, data.Length });
+                    return imgSpans.Count - 1;        // image index
+                };
+                int baseImg = addImage(basePng);
+                int normalImg = addImage(normalPng);
+                int specImg = addImage(specPng);
 
                 bw.Flush();
                 byte[] binData = bin.ToArray();
 
                 string json = BuildJson(vCount, idxCount, posOffset, posLen, normOffset, normLen,
-                    uvOffset, uvLen, idxOffset, idxLen, imgOffset, imgLen, binData.Length, min, max);
+                    uvOffset, uvLen, idxOffset, idxLen, imgSpans, baseImg, normalImg, specImg,
+                    binData.Length, min, max);
 
                 WriteGlb(fileName, json, binData);
             }
@@ -122,9 +140,11 @@ namespace SporeMaster.RenderWare4
         private static string BuildJson(int vCount, int idxCount,
             int posOffset, int posLen, int normOffset, int normLen,
             int uvOffset, int uvLen, int idxOffset, int idxLen,
-            int imgOffset, int imgLen, int bufferLength, float[] min, float[] max)
+            List<int[]> imgSpans, int baseImg, int normalImg, int specImg,
+            int bufferLength, float[] min, float[] max)
         {
-            bool hasImage = imgOffset >= 0;
+            int nImages = imgSpans.Count;
+            bool hasMaterial = nImages > 0;
 
             var bufferViews = new List<object>
             {
@@ -133,8 +153,16 @@ namespace SporeMaster.RenderWare4
                 new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = uvOffset,   ["byteLength"] = uvLen,   ["target"] = TARGET_ARRAY },
                 new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = idxOffset,  ["byteLength"] = idxLen,  ["target"] = TARGET_ELEMENT }
             };
-            if (hasImage)
-                bufferViews.Add(new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = imgOffset, ["byteLength"] = imgLen });
+            // one bufferView + image + texture per embedded PNG; texture index == image index
+            var images = new List<object>();
+            var textures = new List<object>();
+            for (int i = 0; i < nImages; i++)
+            {
+                int bvIndex = bufferViews.Count;
+                bufferViews.Add(new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = imgSpans[i][0], ["byteLength"] = imgSpans[i][1] });
+                images.Add(new Dictionary<string, object> { ["bufferView"] = bvIndex, ["mimeType"] = "image/png" });
+                textures.Add(new Dictionary<string, object> { ["sampler"] = 0, ["source"] = i });
+            }
 
             var primitive = new Dictionary<string, object>
             {
@@ -142,7 +170,7 @@ namespace SporeMaster.RenderWare4
                 ["indices"] = 3,
                 ["mode"] = MODE_TRIANGLES
             };
-            if (hasImage) primitive["material"] = 0;
+            if (hasMaterial) primitive["material"] = 0;
 
             var gltf = new Dictionary<string, object>
             {
@@ -169,23 +197,37 @@ namespace SporeMaster.RenderWare4
                 }
             };
 
-            if (hasImage)
+            if (hasMaterial)
             {
-                gltf["images"] = new object[] { new Dictionary<string, object> { ["bufferView"] = 4, ["mimeType"] = "image/png" } };
+                gltf["images"] = images.ToArray();
                 gltf["samplers"] = new object[] { new Dictionary<string, object>() };
-                gltf["textures"] = new object[] { new Dictionary<string, object> { ["sampler"] = 0, ["source"] = 0 } };
-                gltf["materials"] = new object[]
+                gltf["textures"] = textures.ToArray();
+
+                var pbr = new Dictionary<string, object>
                 {
-                    new Dictionary<string, object>
-                    {
-                        ["pbrMetallicRoughness"] = new Dictionary<string, object>
-                        {
-                            ["baseColorTexture"] = new Dictionary<string, object> { ["index"] = 0 },
-                            ["metallicFactor"] = 0.0,
-                            ["roughnessFactor"] = 1.0
-                        }
-                    }
+                    ["metallicFactor"] = 0.0,
+                    ["roughnessFactor"] = 1.0
                 };
+                if (baseImg >= 0) pbr["baseColorTexture"] = new Dictionary<string, object> { ["index"] = baseImg };
+
+                var material = new Dictionary<string, object> { ["pbrMetallicRoughness"] = pbr };
+                if (normalImg >= 0)
+                    material["normalTexture"] = new Dictionary<string, object> { ["index"] = normalImg };
+                if (specImg >= 0)
+                {
+                    // KHR_materials_specular: a full-strength specular tinted by the spec texture.
+                    material["extensions"] = new Dictionary<string, object>
+                    {
+                        ["KHR_materials_specular"] = new Dictionary<string, object>
+                        {
+                            ["specularColorTexture"] = new Dictionary<string, object> { ["index"] = specImg }
+                        }
+                    };
+                }
+
+                gltf["materials"] = new object[] { material };
+                if (specImg >= 0)
+                    gltf["extensionsUsed"] = new object[] { "KHR_materials_specular" };
             }
 
             return JsonConvert.SerializeObject(gltf);

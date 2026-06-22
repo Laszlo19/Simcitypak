@@ -121,9 +121,21 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     chain Mesh -> `RWMeshMaterialAssignment`(0x2001a) -> `RW4TexMetadata`(0x2000b) is a Spore-ism
     and is NOT how SimCity links textures (it's `RW4Material` + external instance ids); 0x2001a
     stays disabled.
-    TODO on the .glb: normal/specular maps as glTF normalTexture/metallicRoughness, DXT-compressed
-    raster images (pixFmt != 21), .obj/.mtl textures, skeleton, animation. export-obj is untextured
-    (no .mtl emitted).
+    **Normal + specular maps (done):** ground-truthed the material slots by dumping each
+    resolved map to PNG and looking: slot u1=1 is a false-colour zone/material mask (the best
+    available "colour" map — used as base color), slot u1=2 is the NORMAL map, slot u1=3 a
+    secondary mask. SimCity normal maps are stored "pink" (flat ~255,128,128 = up component in
+    RED), so they need an R<->B swizzle to the glTF convention (flat 128,128,255); the SporeModder
+    addon's 3-texture static model confirms slot1=normal with **specular packed in the normal's
+    alpha**. Implementation: `GltfConverter.MaterialTextures{BaseColor,Normal,Specular}` returned
+    by the resolver; `GltfConverter` now emits `normalTexture` and `KHR_materials_specular`
+    (specularColorTexture). `CliRunner.ResolveTextures` detects the pink normal
+    (`IsSimCityNormalMap`: R>180, G/B near 128), unswizzles it (`UnswizzleNormal`), and lifts the
+    alpha into a greyscale spec map (`SpecularFromAlpha`, skipped if alpha is constant). Verified
+    on DLC0 + Central Train Station: glb has 3 images, normal avg ~(128,128,252) (correct blue
+    flat) confirmed by extracting+viewing the PNG, KHR_materials_specular declared in extensionsUsed.
+    TODO on the .glb: DXT-compressed raster images (pixFmt != 21), .obj/.mtl textures, skeleton,
+    animation. export-obj is untextured (no .mtl emitted).
   - `export-texture <input> <outputDir>` — RW4 Texture sections (type 0x20003) → .dds files.
     Added `Texture.SaveDds(path)` in `RenderWare4\Texture.cs` — writes the DDS magic+header
     (same header ToImage() builds) + the raw block-compressed blob, WITHOUT the GraphicsDevice
