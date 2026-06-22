@@ -12,15 +12,27 @@ namespace SporeMaster.RenderWare4
     /// <summary>
     /// Exports an RW4 mesh to a self-contained binary glTF 2.0 file (.glb):
     /// positions + normals + texture coordinates + triangle indices, plus the
-    /// model's primary embedded texture (decoded from DXT to PNG) as the base
-    /// color of a single material.
+    /// model's diffuse texture (decoded to PNG) as the base color of a single
+    /// material. The diffuse is supplied by an optional resolver callback (which
+    /// looks up the model's RW4Material texture references across packages); if no
+    /// resolver is given or it returns null, a heuristic picks the largest
+    /// non-normal-map texture embedded in the model itself.
     ///
-    /// In-app equivalent of the geometry+diffuse side of the SporeModder Blender
-    /// add-on. Still TODO: per-mesh material mapping, normal/specular maps,
-    /// skeleton and animation (see HANDOFF.md).
+    /// Still TODO: normal/specular maps, skeleton and animation (see HANDOFF.md).
     /// </summary>
     public class GltfConverter : IConverter
     {
+        /// <summary>
+        /// Optional callback that returns the diffuse texture for a mesh as PNG bytes
+        /// (or null). When set, it takes priority over the internal-texture heuristic;
+        /// it lets the caller resolve the model's RW4Material texture references against
+        /// other loaded packages (the real SimCity textures live outside the model).
+        /// </summary>
+        private readonly Func<RW4Mesh, byte[]> _diffuseProvider;
+
+        public GltfConverter() { }
+        public GltfConverter(Func<RW4Mesh, byte[]> diffuseProvider) { _diffuseProvider = diffuseProvider; }
+
         private const uint GLB_MAGIC = 0x46546C67;   // "glTF"
         private const uint GLB_VERSION = 2;
         private const uint CHUNK_JSON = 0x4E4F534A;  // "JSON"
@@ -43,7 +55,11 @@ namespace SporeMaster.RenderWare4
             var tris = mesh.triangles.triangles;
             int vCount = verts.Length;
 
-            byte[] png = TryGetDiffusePng(mesh);   // null if no usable texture
+            // Prefer the caller's resolver (RW4Material -> external texture resources);
+            // fall back to the internal-texture heuristic.
+            byte[] png = null;
+            if (_diffuseProvider != null) { try { png = _diffuseProvider(mesh); } catch { png = null; } }
+            if (png == null) png = TryGetDiffusePng(mesh);   // null if no usable texture
 
             using (var bin = new MemoryStream())
             using (var bw = new BinaryWriter(bin))
@@ -247,7 +263,7 @@ namespace SporeMaster.RenderWare4
         /// clustered around mid-grey. Used to avoid picking a normal map as the
         /// base color when a model has several textures.
         /// </summary>
-        private static bool LooksLikeNormalMap(byte[] rgba)
+        public static bool LooksLikeNormalMap(byte[] rgba)
         {
             int n = rgba.Length / 4;
             if (n == 0) return false;
@@ -258,7 +274,7 @@ namespace SporeMaster.RenderWare4
                    && ab > ar + 40 && ab > ag + 40;
         }
 
-        private static byte[] RgbaToPng(byte[] rgba, int w, int h)
+        public static byte[] RgbaToPng(byte[] rgba, int w, int h)
         {
             using (Bitmap bmp = RgbaToBitmap(rgba, w, h))
             using (var ms = new MemoryStream())
