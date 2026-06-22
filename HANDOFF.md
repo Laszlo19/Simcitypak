@@ -165,12 +165,41 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     quaternions; valid glTF skin (joints in range, weights normalised, bind pose undeformed).
     Static models (no skeleton) unchanged. NOTE matrix helpers (`Mat4Mul`/`Mat4Inverse`/
     `Mat4DecomposeTRS`) live in GltfConverter; quaternion order is xyzw (glTF).
-    **Skin requires real blend data.** A skeleton+animation is only emitted when the mesh has
-    actual per-vertex `BLENDINDICES` (non-zero). Without them every vertex would bind to joint 0
-    (the static root) and the other joints' motion would move nothing — a misleading "empty"
-    animation (reported by the user on many building models). `ExtractSkin` now returns null in
-    that case, so the model exports as a clean static mesh. Real skinned models (vehicles/
-    characters / multi-bone-weighted buildings like ec3eade0) still get skin + animation.
+    **Blend index = jointIndex*3 (critical).** SimCity/Spore store the per-vertex `BLENDINDICES`
+    as the joint index times 3 (the shader addresses the skin-matrix array 3 rows per bone — the
+    SporeModder importer does `blendIndices[i] // 3`). `ReadQuadU` now divides by 3. Without this
+    the indices were 3x too large, got clamped to 0, and every vertex collapsed onto the static
+    root joint → the skinned models looked static ("animated in-game models have no animation").
+    After the fix ec3eade0's verts weight to joints 1..16 (all animated) and it deforms.
+    **Skin requires the BLENDINDICES element to be present** (not its value). When a mesh has no
+    blend element at all, `ExtractSkin` returns null and the model exports as a clean static mesh
+    (no skin/animation) — matching the SporeModder importer, which parents such meshes to the
+    armature without weights (no deformation). This avoids the misleading "empty animation" on
+    building models whose only motion is on unweighted attachment bones.
+
+    **Animated buildings = lot/prop COMPOSITION, not single-mesh skinning (important).** Investigated
+    from a user report that the Oil Refinery animates in-game but exported static. Findings on
+    `SimCity_Game.package` (via the localized-name search): the Oil Refinery (`0xa50fc927`), Oil
+    Pumpjack, Oil Well, Water Pump, Oil/Conventional/Clean Power Plants, Petroleum HQ, etc. ALL
+    have a **skeleton (4–29 joints) + several Anim sections, but NO per-vertex blend data** and **no
+    per-vertex bone index in ANY vertex channel** (checked POSITION/NORMAL/TANGENT/COLOR + all 3
+    TEXCOORDs — the only spare UBYTE4 holds `{0,127,254}` mask values, not joint indices). So a
+    building's RW4 model is just the **static shell**; its skeleton bones are **attachment points**
+    that the engine animates and onto which it hangs **separate** moving sub-model resources (pump
+    arms, flare stacks, spinning signs, etc.). The visible in-game animation is the assembled LOT,
+    not deformation of one mesh. (The SporeModder importer reaches the same dead-end — it leaves
+    these meshes static.)
+    Consequence for export: a single-model `.glb` cannot reproduce these animations; we export the
+    shell statically (correct, no fake empty animation). Truly skinned models (per-vertex weights —
+    characters, some vehicles/props) DO animate via the skin path above.
+    **TODO if someone wants real animated buildings:** implement lot/prop composition — read the
+    building's LOT/prop definition to find which child model resources attach to which bone (by the
+    bone's name fnv / a placement prop), export them as a glTF node tree parented to the animated
+    joint nodes (each child a static mesh under its bone). The bone animation already parses
+    (`Anim.channels`); what's missing is the model↔bone attachment mapping, which lives in the
+    prop/lot data (see the `--combine` prop investigation in §4 for how assets group), plus loading
+    the child model resources (often in sibling packages). This is a sizable feature, well beyond
+    per-model export, and is the only way to make the Oil Refinery etc. move in an export.
     **Facade-building UVs (gated).** Real models (vehicles/props/characters) carry a clean FLOAT2
     UV. Facade buildings have only a FLOAT4 texcoord that is a large WORLD-projection coordinate
     (adjacent verts share ~identical values) — using it scrambles any flat texture. The exporter
