@@ -134,8 +134,24 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     alpha into a greyscale spec map (`SpecularFromAlpha`, skipped if alpha is constant). Verified
     on DLC0 + Central Train Station: glb has 3 images, normal avg ~(128,128,252) (correct blue
     flat) confirmed by extracting+viewing the PNG, KHR_materials_specular declared in extensionsUsed.
-    TODO on the .glb: DXT-compressed raster images (pixFmt != 21), .obj/.mtl textures, skeleton,
-    animation. export-obj is untextured (no .mtl emitted).
+    TODO on the .glb: DXT-compressed raster images (pixFmt != 21), .obj/.mtl textures.
+    export-obj is untextured (no .mtl emitted).
+
+    **Skeleton + skin (done).** `RW4Model.Read` now parses `RW4Skeleton` (0x7000c) — joint
+    `HierarchyInfo` (names/parents) + bind matrices — and `Anim` (0x70001) was rewritten for
+    SimCity's keyframe formats (0x101 LocRot etc.; see commit). `GltfConverter.ExtractSkin` builds
+    a glTF skin: bind position per joint = `R·(−t)` from the inverse-bind (Matrices4x4, the 3x3
+    rotation + translation, per the SporeModder importer); inverse-bind matrices are pure
+    `translate(−bindPos)` and joint nodes are translation-only, so the **bind pose is undeformed**
+    while a scene-root node carries the Z-up→Y-up −90° rotation (which then applies uniformly to
+    the skinned mesh). Per-vertex `JOINTS_0`/`WEIGHTS_0` come from the mesh's `BLENDINDICES`/
+    `BLENDWEIGHT` components (UBYTE4/SHORT4/FLOAT4, normalized); meshes with a skeleton but no blend
+    data bind fully to joint 0. Verified on DLC0: ec3eade0 (17 joints, real per-vertex weights) and
+    6b6d124f (3 joints, bind-to-root) produce valid glTF skins (joints in range, weights normalized,
+    bind pose provably undeformed). Static models (no skeleton) are unchanged.
+    **Animation — NOT yet exported (next step).** The keyframe data now parses (Anim.channels =
+    per-joint TRS+time), but emitting glTF animation samplers/channels (and resolving local-vs-
+    absolute pose space + the bind-rotation we currently fold into the root) is the remaining work.
 
     **Base color: greyscale facade from palette luminance (done — replaces the neon look).**
     SimCity buildings have **no baked albedo**. The material slots are: u1=0 a small per-model
