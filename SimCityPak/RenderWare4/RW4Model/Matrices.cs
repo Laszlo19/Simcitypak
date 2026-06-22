@@ -22,6 +22,9 @@ namespace SporeMaster.RenderWare4
             r.expect(0, "MS002");
             if (p1 != r.Position)
                 throw new ModelFormatException(r, "MS001", p1);
+            // Guard against a garbage count (would otherwise allocate/loop unbounded and hang).
+            if (Tsize <= 0 || count > (uint)(s.Size / Tsize) + 1)
+                throw new ModelFormatException(r, "MS-count", count);
             items = new T[count];
             for (int i = 0; i < count; i++)
                 items[i].Read(r);

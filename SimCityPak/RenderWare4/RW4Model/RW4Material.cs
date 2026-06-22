@@ -181,11 +181,18 @@ namespace SporeMaster.RenderWare4
             }
 
             long currentPos = r.Position;
+            // Scan for the 0x2D marker, but never past the section end — otherwise a malformed
+            // material (or a misjudged VertexFormat size) makes this read past EOF forever
+            // (MemoryStream returns 0 without advancing), hanging the whole export.
+            long sectionEnd = s.Pos + s.Size;
             uint u2D = 0;
-            while (u2D != 0x2D)
+            bool found = false;
+            while (r.Position + 4 <= sectionEnd)
             {
                 u2D = r.ReadU32();
+                if (u2D == 0x2D) { found = true; break; }
             }
+            if (!found) throw new ModelFormatException(r, "RW4Material: 0x2D marker not found in section", s.type_code);
             int additionalDataSize = (int)r.Position - (int)currentPos - 4;
             r.Seek(currentPos, SeekOrigin.Begin);
 
