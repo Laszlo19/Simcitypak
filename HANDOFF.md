@@ -165,12 +165,17 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     quaternions; valid glTF skin (joints in range, weights normalised, bind pose undeformed).
     Static models (no skeleton) unchanged. NOTE matrix helpers (`Mat4Mul`/`Mat4Inverse`/
     `Mat4DecomposeTRS`) live in GltfConverter; quaternion order is xyzw (glTF).
-    **Skin requires real blend data.** A skeleton+animation is only emitted when the mesh has
-    actual per-vertex `BLENDINDICES` (non-zero). Without them every vertex would bind to joint 0
-    (the static root) and the other joints' motion would move nothing — a misleading "empty"
-    animation (reported by the user on many building models). `ExtractSkin` now returns null in
-    that case, so the model exports as a clean static mesh. Real skinned models (vehicles/
-    characters / multi-bone-weighted buildings like ec3eade0) still get skin + animation.
+    **Blend index = jointIndex*3 (critical).** SimCity/Spore store the per-vertex `BLENDINDICES`
+    as the joint index times 3 (the shader addresses the skin-matrix array 3 rows per bone — the
+    SporeModder importer does `blendIndices[i] // 3`). `ReadQuadU` now divides by 3. Without this
+    the indices were 3x too large, got clamped to 0, and every vertex collapsed onto the static
+    root joint → the skinned models looked static ("animated in-game models have no animation").
+    After the fix ec3eade0's verts weight to joints 1..16 (all animated) and it deforms.
+    **Skin requires the BLENDINDICES element to be present** (not its value). When a mesh has no
+    blend element at all, `ExtractSkin` returns null and the model exports as a clean static mesh
+    (no skin/animation) — matching the SporeModder importer, which parents such meshes to the
+    armature without weights (no deformation). This avoids the misleading "empty animation" on
+    building models whose only motion is on unweighted attachment bones.
     **Facade-building UVs (gated).** Real models (vehicles/props/characters) carry a clean FLOAT2
     UV. Facade buildings have only a FLOAT4 texcoord that is a large WORLD-projection coordinate
     (adjacent verts share ~identical values) — using it scrambles any flat texture. The exporter

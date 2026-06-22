@@ -186,7 +186,7 @@ namespace SporeMaster.RenderWare4
                             if (c.Usage == D3DDECLUSAGE.D3DDECLUSAGE_BLENDINDICES) { ReadQuadU(c, idx, n); gotIdx = true; }
                             else if (c.Usage == D3DDECLUSAGE.D3DDECLUSAGE_BLENDWEIGHT) { ReadQuadF(c, wt); gotWt = true; }
                         }
-                    if (gotIdx && (idx[0] != 0 || idx[1] != 0 || idx[2] != 0 || idx[3] != 0)) meshHasBlend = true;
+                    if (gotIdx) meshHasBlend = true;   // a BLENDINDICES element present = real skin
                     if (!gotIdx) { idx[0] = 0; }
                     if (!gotWt) { wt[0] = 1; wt[1] = wt[2] = wt[3] = 0; }
                     float sum = wt[0] + wt[1] + wt[2] + wt[3];
@@ -236,7 +236,9 @@ namespace SporeMaster.RenderWare4
         {
             var u = c as VertexUByte4Value; if (u != null) { outv[0] = u.X; outv[1] = u.Y; outv[2] = u.Z; outv[3] = u.W; }
             else { var s = c as VertexShort4Value; if (s != null) { outv[0] = (ushort)s.X; outv[1] = (ushort)s.Y; outv[2] = (ushort)s.Z; outv[3] = (ushort)s.W; } }
-            for (int k = 0; k < 4; k++) if (outv[k] >= jointCount) outv[k] = 0;   // clamp stray indices
+            // SimCity/Spore store the blend index as jointIndex*3 (the shader addresses the skin
+            // matrix array 3 rows per bone), so divide by 3 to get the real joint index.
+            for (int k = 0; k < 4; k++) { outv[k] /= 3; if (outv[k] >= jointCount) outv[k] = 0; }
         }
 
         private static void ReadQuadF(IVertexComponentValue c, float[] outv)
