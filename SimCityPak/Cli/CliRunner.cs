@@ -219,6 +219,7 @@ namespace SimCityPak.Cli
         }
 
 
+
         // ----- texture resolution (for textured model export) ---------------
 
         // SimCity stores textures as separate resources, referenced from a model's
@@ -299,8 +300,8 @@ namespace SimCityPak.Cli
             {
                 if (lookup == null || mesh == null || mesh.model == null) return null;
 
-                byte[] baseRgba = null, fbRgba = null, normalRgba = null;
-                int baseW = 0, baseH = 0, fbW = 0, fbH = 0, nW = 0, nH = 0;
+                byte[] baseRgba = null, fbRgba = null, normalRgba = null, palLum = null;
+                int baseW = 0, baseH = 0, fbW = 0, fbH = 0, nW = 0, nH = 0, palW = 0;
                 long baseArea = -1, fbArea = -1, nArea = -1;
 
                 foreach (RW4Section s in mesh.model.Sections)
@@ -312,6 +313,13 @@ namespace SimCityPak.Cli
                         DatabaseIndex tdi;
                         if (mr.TextureInstanceId == 0) continue;
                         if (!lookup.TryGetValue(mr.TextureInstanceId, out tdi)) continue;
+                        // The per-model facade palette (float32 strip, textureType 116): keep its
+                        // row-0 luminance for compositing rather than treating it as a colour map.
+                        if (palLum == null)
+                        {
+                            int pw; byte[] lum = DecodePaletteLuminance(tdi, out pw);
+                            if (lum != null) { palLum = lum; palW = pw; continue; }
+                        }
                         int w, h;
                         byte[] rgba = DecodeTextureResourceRgba(tdi, out w, out h);
                         if (rgba == null || w < 16 || h < 16) continue;   // skip strips/atlases
@@ -330,6 +338,14 @@ namespace SimCityPak.Cli
                 byte[] colorRgba = baseRgba ?? fbRgba;
                 int cW = baseRgba != null ? baseW : fbW, cH = baseRgba != null ? baseH : fbH;
                 if (colorRgba == null && normalRgba == null) return null;
+
+                // SimCity has no baked albedo. The colour map is a false-colour region/zone atlas
+                // whose RED channel indexes the per-model palette. The palette is a 4-row HDR
+                // material table, not an RGB LUT, but its row 0 is an albedo *luminance*; map the
+                // region atlas through it to get a clean grey facade (light walls, dark windows)
+                // instead of the neon atlas. Full colour needs the GlassBox shader.
+                if (colorRgba != null && palLum != null && palW > 1)
+                    colorRgba = CompositeFacadeLuminance(colorRgba, cW, cH, palLum, palW);
 
                 var result = new GltfConverter.MaterialTextures();
                 if (colorRgba != null) result.BaseColor = GltfConverter.RgbaToPng(colorRgba, cW, cH);
@@ -386,6 +402,53 @@ namespace SimCityPak.Cli
             {
                 byte a = rgba[i * 4 + 3];
                 outp[i * 4] = a; outp[i * 4 + 1] = a; outp[i * 4 + 2] = a; outp[i * 4 + 3] = 255;
+            }
+            return outp;
+        }
+
+        /// <summary>Reads the per-model facade palette (float32 RGBA, textureType 116) and returns
+        /// row 0 as <paramref name="width"/> luminance bytes (its R channel is the albedo
+        /// brightness; the other rows/channels are HDR material params, not colour). Null if the
+        /// resource isn't such a palette.</summary>
+        private static byte[] DecodePaletteLuminance(DatabaseIndex tdi, out int width)
+        {
+            width = 0;
+            if (tdi.TypeId != RW4_MODEL_TYPE_ID) return null;
+            try
+            {
+                var model = new RW4Model();
+                using (var ms = new MemoryStream(tdi.GetIndexData(true))) model.Read(ms);
+                var texSec = model.Sections.FirstOrDefault(x => x.TypeCode == SectionTypeCodes.Texture && x.obj is Texture);
+                if (texSec == null) return null;
+                Texture t = (Texture)texSec.obj;
+                if (t.textureType != 116) return null;       // D3DFMT_A32B32G32R32F (float32 RGBA)
+                int w = t.width; byte[] blob = t.texData.blob;
+                if (w <= 0 || blob == null || blob.Length < w * 16) return null;
+                byte[] lum = new byte[w];
+                for (int x = 0; x < w; x++)
+                {
+                    float r = BitConverter.ToSingle(blob, x * 16);   // row 0, R = albedo luminance
+                    int v = (int)(r * 255f + 0.5f);
+                    lum[x] = (byte)(v < 0 ? 0 : (v > 255 ? 255 : v));
+                }
+                width = w;
+                return lum;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Maps a region/zone mask through the palette luminance (mask RED channel is a
+        /// 1-D coordinate, linearly sampled) to a clean greyscale facade. Keeps the mask alpha.</summary>
+        private static byte[] CompositeFacadeLuminance(byte[] maskRgba, int w, int h, byte[] lum, int palW)
+        {
+            byte[] outp = new byte[w * h * 4];
+            for (int i = 0; i < w * h; i++)
+            {
+                float u = maskRgba[i * 4] / 255f * (palW - 1);
+                int c0 = (int)u; if (c0 < 0) c0 = 0; if (c0 > palW - 1) c0 = palW - 1;
+                int c1 = c0 + 1 < palW ? c0 + 1 : c0; float t = u - c0;
+                byte g = (byte)(lum[c0] + (lum[c1] - lum[c0]) * t);
+                outp[i * 4] = g; outp[i * 4 + 1] = g; outp[i * 4 + 2] = g; outp[i * 4 + 3] = maskRgba[i * 4 + 3];
             }
             return outp;
         }
