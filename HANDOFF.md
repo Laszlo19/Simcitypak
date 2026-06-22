@@ -137,6 +137,17 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     TODO on the .glb: DXT-compressed raster images (pixFmt != 21), .obj/.mtl textures.
     export-obj is untextured (no .mtl emitted).
 
+    **UV fix (done).** Models store UVs in `D3DDECLUSAGE_TEXCOORD`. Real props/vehicles/
+    characters use **FLOAT2** with clean 0..1 coords (V negated vs glTF). The exporter previously
+    only recognised **FLOAT4** texcoords, so every FLOAT2 model exported UNTEXTURED (no usable
+    UV), and the facade buildings (which carry a large tiling/world coordinate in a FLOAT4
+    texcoord) tiled their atlas into garbage. `Vertex.HasTextureCoordinates`/`TryGetUV` now prefer
+    the FLOAT2 UV (falling back to FLOAT4), and `GltfConverter` writes V flipped (`-Y`) to match
+    glTF's top-left origin. Verified: ec3eade0 now exports textured with UV U[0.02..0.98]
+    V[0.02..0.98]. NOTE the FLOAT2 models are the ones with real diffuse-style textures + clean
+    UVs; facade buildings still have only the FLOAT4 tiling coord (no clean atlas UV — same
+    shader-system limitation as their colour).
+
     **Skeleton + skin (done).** `RW4Model.Read` now parses `RW4Skeleton` (0x7000c) — joint
     `HierarchyInfo` (names/parents) + bind matrices — and `Anim` (0x70001) was rewritten for
     SimCity's keyframe formats (0x101 LocRot etc.; see commit). `GltfConverter.ExtractSkin` builds

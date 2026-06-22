@@ -44,15 +44,39 @@ namespace SporeMaster.RenderWare4
             }
         }
 
-        /// <summary>True when this vertex carries FLOAT4 texture coordinates (some meshes
-        /// have none, e.g. shadow/collision meshes); used to avoid throwing on export.</summary>
+        /// <summary>True when this vertex carries usable texture coordinates (FLOAT2 — the
+        /// normal per-vertex UV on most models — or FLOAT4, used by the facade buildings). Some
+        /// meshes have none (shadow/collision); used to avoid throwing on export.</summary>
         public bool HasTextureCoordinates
         {
             get
             {
                 return VertexComponents != null && VertexComponents.Any(
-                    v => v.Usage == D3DDECLUSAGE.D3DDECLUSAGE_TEXCOORD && v.DeclarationType == D3DDECLTYPE.D3DDECLTYPE_FLOAT4);
+                    v => v.Usage == D3DDECLUSAGE.D3DDECLUSAGE_TEXCOORD &&
+                         (v.DeclarationType == D3DDECLTYPE.D3DDECLTYPE_FLOAT2 || v.DeclarationType == D3DDECLTYPE.D3DDECLTYPE_FLOAT4));
             }
+        }
+
+        /// <summary>Best UV for export: the first FLOAT2 TEXCOORD (the real per-vertex UV on
+        /// vehicles/props/characters), else the first FLOAT4 TEXCOORD (facade buildings store a
+        /// large tiling/world coordinate here). Returns false if the vertex has no usable UV.</summary>
+        public bool TryGetUV(out float u, out float v)
+        {
+            u = 0; v = 0;
+            if (VertexComponents == null) return false;
+            foreach (var c in VertexComponents)
+            {
+                if (c.Usage != D3DDECLUSAGE.D3DDECLUSAGE_TEXCOORD) continue;
+                var f2 = c as VertexFloat2Value;
+                if (f2 != null) { u = f2.X; v = f2.Y; return true; }
+            }
+            foreach (var c in VertexComponents)
+            {
+                if (c.Usage != D3DDECLUSAGE.D3DDECLUSAGE_TEXCOORD) continue;
+                var f4 = c as VertexFloat4Value;
+                if (f4 != null) { u = f4.X; v = f4.Y; return true; }
+            }
+            return false;
         }
 
         public Vector3 Normal

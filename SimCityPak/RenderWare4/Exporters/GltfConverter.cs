@@ -198,7 +198,9 @@ namespace SporeMaster.RenderWare4
                 int uvOffset = (int)bin.Position;
                 foreach (Vertex v in verts)
                 {
-                    if (hasUv) { var t = v.TextureCoordinates; bw.Write(t.X); bw.Write(t.Y); }
+                    // RW4 stores V negated relative to glTF's top-left origin, so flip it.
+                    float u, vv;
+                    if (hasUv && v.TryGetUV(out u, out vv)) { bw.Write(u); bw.Write(-vv); }
                     else { bw.Write(0f); bw.Write(0f); }
                 }
                 int uvLen = vCount * 8;

@@ -61,6 +61,7 @@ namespace SporeMaster.RenderWare4
         {
             if (s.type_code != type_code) throw new ModelFormatException(r, "AN000", s.type_code);
             long basePos = s.Pos;
+            long limit = s.Pos + s.Size;     // hard upper bound for every read in this section
 
             uint pChannelNames = r.ReadU32();
             uint channelCount = r.ReadU32();
@@ -74,6 +75,12 @@ namespace SporeMaster.RenderWare4
             field_24 = r.ReadU32();
             flags = r.ReadU32();
             uint pChannelInfo = r.ReadU32();
+
+            // Bounds-check the header so malformed/foreign sections fail fast (the caller catches
+            // this and exports the model without animation) instead of looping on garbage offsets.
+            if (channelCount == 0 || channelCount > 4096) throw new ModelFormatException(r, "AN-channels", channelCount);
+            if (pChannelNames < s.Pos || pChannelNames + channelCount * 4 > limit) throw new ModelFormatException(r, "AN-names", pChannelNames);
+            if (pChannelInfo < s.Pos || pChannelInfo + channelCount * 12 > limit) throw new ModelFormatException(r, "AN-info", pChannelInfo);
 
             channels = new Channel[channelCount];
             for (int i = 0; i < channelCount; i++) channels[i] = new Channel();
@@ -92,28 +99,32 @@ namespace SporeMaster.RenderWare4
                 channels[i].components = r.ReadU32();
             }
 
-            // All but the last channel: keyframe count from the gap to the next channel.
-            for (int i = 0; i < channelCount - 1; i++)
+            for (int i = 0; i < channelCount; i++)
             {
-                uint stride = channels[i].poseSize != 0 ? channels[i].poseSize : (uint)Math.Max(1, PoseSizeFor(channels[i].components));
-                int count = (int)((positions[i + 1] - positions[i]) / stride);
-                r.Seek(basePos + positions[i], SeekOrigin.Begin);
-                for (int k = 0; k < count; k++) channels[i].keys.Add(ReadKey(r, channels[i].components));
-            }
-            // Last channel: read until the timestamp stops increasing.
-            if (channelCount > 0)
-            {
-                Channel last = channels[channelCount - 1];
-                r.Seek(basePos + positions[channelCount - 1], SeekOrigin.Begin);
-                float lastTime = -1f;
-                long limit = s.Pos + s.Size;
-                while (r.Position + PoseSizeFor(last.components) <= limit)
+                Channel ch = channels[i];
+                int stride = ch.poseSize != 0 ? (int)ch.poseSize : PoseSizeFor(ch.components);
+                if (stride <= 0) continue;                       // unknown pose format -> no keys
+
+                long start = basePos + positions[i];
+                if (start < s.Pos || start >= limit) continue;   // bad offset -> skip channel
+
+                // keyframe count: from the gap to the next channel; last channel runs to the end.
+                long avail = limit - start;
+                long span = i < channelCount - 1 && positions[i + 1] > positions[i]
+                    ? (long)(positions[i + 1] - positions[i]) : avail;
+                long count = Math.Min(span, avail) / stride;
+                if (count < 0) count = 0;
+
+                r.Seek(start, SeekOrigin.Begin);
+                float lastTime = float.NegativeInfinity;
+                for (long k = 0; k < count; k++)
                 {
-                    Key k = ReadKey(r, last.components);
-                    if (k.time < lastTime) break;
-                    lastTime = k.time;
-                    last.keys.Add(k);
-                    if (k.time >= length) break;
+                    if (r.Position + stride > limit) break;      // never read past the section
+                    Key key = ReadKey(r, ch.components);
+                    // last channel's exact count is unknown, so stop when time stops advancing
+                    if (i == channelCount - 1 && key.time < lastTime) break;
+                    lastTime = key.time;
+                    ch.keys.Add(key);
                 }
             }
             // Leave the stream at the section end so the loader's size check passes.
