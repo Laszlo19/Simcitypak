@@ -218,6 +218,7 @@ namespace SimCityPak.Cli
             return fails > 0 ? 1 : 0;
         }
 
+
         // ----- texture resolution (for textured model export) ---------------
 
         // SimCity stores textures as separate resources, referenced from a model's
@@ -516,6 +517,10 @@ namespace SimCityPak.Cli
             }
             catch { return map; }
 
+            // Parse every prop once: its name (if any), the RW4 models it references, and its
+            // "Model Details" target instance (a catalog prop's link to the model/gameplay asset).
+            var byInstance = new Dictionary<uint, List<PropRec>>();
+            var recs = new List<PropRec>();
             foreach (DatabaseIndex index in indices)
             {
                 if (index.TypeId != PROP_TYPE_ID) continue;
@@ -523,7 +528,7 @@ namespace SimCityPak.Cli
                 try { pf = new PropertyFile(index); }
                 catch { continue; }
 
-                string name = null;
+                var rec = new PropRec { Instance = index.InstanceId, ModelRefs = new List<uint>() };
                 foreach (uint h in NameHashes)
                 {
                     Property prop;
@@ -533,28 +538,64 @@ namespace SimCityPak.Cli
                     TextProperty tp = arr.Values[0] as TextProperty;
                     if (tp == null) continue;
                     string s = locale.GetLocalizedString(tp.TableId, tp.InstanceId);
-                    if (!string.IsNullOrEmpty(s)) { name = s; break; }
+                    if (!string.IsNullOrEmpty(s)) { rec.Name = s; break; }
                 }
-                if (string.IsNullOrEmpty(name)) continue;
+                foreach (var kv in pf.Values) CollectModelRefs(kv.Value, rec.ModelRefs);
+                Property md;
+                if (pf.Values.TryGetValue(MODEL_DETAILS_HASH, out md))
+                {
+                    KeyProperty kp = md as KeyProperty;
+                    if (kp != null) rec.ModelDetails = kp.InstanceId;
+                }
+                recs.Add(rec);
+                List<PropRec> list;
+                if (!byInstance.TryGetValue(rec.Instance, out list)) { list = new List<PropRec>(); byInstance[rec.Instance] = list; }
+                list.Add(rec);
+            }
 
-                if (!map.ContainsKey(index.InstanceId)) map[index.InstanceId] = name;
-                foreach (var kv in pf.Values) CollectKeyRefs(kv.Value, name, map);
+            // Assign each name to: the named prop's own instance and model refs, plus the model
+            // refs of every prop sharing that instance or sitting at its Model-Details target
+            // (so a building's catalog name reaches the models its unnamed model-prop references).
+            Action<uint, string> nameInstanceModels = (inst, name) =>
+            {
+                List<PropRec> list;
+                if (!byInstance.TryGetValue(inst, out list)) return;
+                foreach (PropRec q in list)
+                    foreach (uint mref in q.ModelRefs)
+                        if (!map.ContainsKey(mref)) map[mref] = name;
+            };
+            foreach (PropRec r in recs)
+            {
+                if (string.IsNullOrEmpty(r.Name)) continue;
+                if (!map.ContainsKey(r.Instance)) map[r.Instance] = r.Name;
+                foreach (uint mref in r.ModelRefs) if (!map.ContainsKey(mref)) map[mref] = r.Name;
+                nameInstanceModels(r.Instance, r.Name);
+                if (r.ModelDetails != 0) nameInstanceModels(r.ModelDetails, r.Name);
             }
             return map;
         }
 
-        private static void CollectKeyRefs(Property p, string name, Dictionary<uint, string> map)
+        private class PropRec
+        {
+            public uint Instance;
+            public string Name;
+            public List<uint> ModelRefs;
+            public uint ModelDetails;
+        }
+
+        /// <summary>Collects the instance ids of every RW4 model (type id 0x2f4e681b) referenced
+        /// by a property, recursing into arrays.</summary>
+        private static void CollectModelRefs(Property p, List<uint> refs)
         {
             KeyProperty kp = p as KeyProperty;
             if (kp != null)
             {
-                if (kp.TypeId == RW4_MODEL_TYPE_ID && !map.ContainsKey(kp.InstanceId))
-                    map[kp.InstanceId] = name;
+                if (kp.TypeId == RW4_MODEL_TYPE_ID) refs.Add(kp.InstanceId);
                 return;
             }
             ArrayProperty arr = p as ArrayProperty;
             if (arr != null)
-                foreach (Property sub in arr.Values) CollectKeyRefs(sub, name, map);
+                foreach (Property sub in arr.Values) CollectModelRefs(sub, refs);
         }
 
         private static string Sanitize(string name)
@@ -1159,10 +1200,12 @@ namespace SimCityPak.Cli
             // (for the GUI that's all loaded packages, so shared graphics textures apply).
             var texLookup = BuildTextureLookup(indices);
             var used = new HashSet<string>();
-            int glb = 0, tex = 0, fails = 0;
+            int glb = 0, tex = 0, fails = 0, models = 0, named = 0;
             foreach (DatabaseIndex index in indices)
             {
                 if (index.TypeId != RW4_MODEL_TYPE_ID) continue;
+                models++;
+                if (nameMap.ContainsKey(index.InstanceId)) named++;
                 string fallback = string.Format("{0:x8}-{1:x8}-{2:x8}",
                     index.TypeId, index.GroupContainer, index.InstanceId);
                 string baseName = ResolveBaseName(index.InstanceId, fallback, nameMap, used);
@@ -1175,8 +1218,8 @@ namespace SimCityPak.Cli
                 catch (Exception ex) { fails++; Logger.Exception("export-all textures " + baseName, ex); }
             }
             string summary = string.Format(
-                "Exported {0} models (.glb) and {1} textures (.{2}); {3} failed.\nLocalized names: {4}.",
-                glb, tex, format, fails, nameMap.Count);
+                "Exported {0} models (.glb) and {1} textures (.{2}); {3} failed.\n{4} of {5} models got a localized name (the rest keep their hash id).",
+                glb, tex, format, fails, named, models);
             Logger.Info(summary.Replace(Environment.NewLine, " "));
             return summary;
         }

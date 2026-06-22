@@ -63,14 +63,22 @@ namespace SporeMaster.RenderWare4
             var tris = mesh.triangles.triangles;
             int vCount = verts.Length;
 
+            // Some meshes (shadow/collision) carry no texture coordinates; without UVs a
+            // material can't map, so export geometry only and skip the textures.
+            bool hasUv = vCount > 0 && verts[0].HasTextureCoordinates;
+
             // Prefer the caller's resolver (RW4Material -> external texture resources);
             // fall back to the internal-texture heuristic for the base color.
             MaterialTextures tex = null;
-            if (_textureProvider != null) { try { tex = _textureProvider(mesh); } catch { tex = null; } }
-            byte[] basePng = tex != null ? tex.BaseColor : null;
-            if (basePng == null) basePng = TryGetDiffusePng(mesh);   // null if no usable texture
-            byte[] normalPng = tex != null ? tex.Normal : null;
-            byte[] specPng = tex != null ? tex.Specular : null;
+            byte[] basePng = null, normalPng = null, specPng = null;
+            if (hasUv)
+            {
+                if (_textureProvider != null) { try { tex = _textureProvider(mesh); } catch { tex = null; } }
+                basePng = tex != null ? tex.BaseColor : null;
+                if (basePng == null) basePng = TryGetDiffusePng(mesh);   // null if no usable texture
+                normalPng = tex != null ? tex.Normal : null;
+                specPng = tex != null ? tex.Specular : null;
+            }
 
             using (var bin = new MemoryStream())
             using (var bw = new BinaryWriter(bin))
@@ -91,7 +99,11 @@ namespace SporeMaster.RenderWare4
                 int normLen = vCount * 12;
 
                 int uvOffset = (int)bin.Position;
-                foreach (Vertex v in verts) { bw.Write(v.TextureCoordinates.X); bw.Write(v.TextureCoordinates.Y); }
+                foreach (Vertex v in verts)
+                {
+                    if (hasUv) { var t = v.TextureCoordinates; bw.Write(t.X); bw.Write(t.Y); }
+                    else { bw.Write(0f); bw.Write(0f); }
+                }
                 int uvLen = vCount * 8;
 
                 int idxOffset = (int)bin.Position;

@@ -44,12 +44,24 @@ namespace SporeMaster.RenderWare4
             }
         }
 
+        /// <summary>True when this vertex carries FLOAT4 texture coordinates (some meshes
+        /// have none, e.g. shadow/collision meshes); used to avoid throwing on export.</summary>
+        public bool HasTextureCoordinates
+        {
+            get
+            {
+                return VertexComponents != null && VertexComponents.Any(
+                    v => v.Usage == D3DDECLUSAGE.D3DDECLUSAGE_TEXCOORD && v.DeclarationType == D3DDECLTYPE.D3DDECLTYPE_FLOAT4);
+            }
+        }
+
         public Vector3 Normal
         {
             get
             {
                 Vector3 vector = new Vector3();
-                IVertexComponentValue component = VertexComponents.First(v => v.Usage == D3DDECLUSAGE.D3DDECLUSAGE_NORMAL);
+                IVertexComponentValue component = VertexComponents.FirstOrDefault(v => v.Usage == D3DDECLUSAGE.D3DDECLUSAGE_NORMAL);
+                if (component == null) return vector;
                 if (component.DeclarationType == D3DDECLTYPE.D3DDECLTYPE_UBYTE4)
                 {
                     VertexUByte4Value byteValue = component as VertexUByte4Value;
