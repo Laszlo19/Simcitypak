@@ -1,23 +1,56 @@
 name: Release MSI
 
 # Manually triggered: builds the app, packages the MSI, and publishes it as a
-# GitHub Release. Run it from the Actions tab ("Run workflow").
+# GitHub Release. Run it from the Actions tab ("Run workflow"). By default the
+# version is auto-incremented (patch +1) from the latest published Release;
+# optionally type an explicit version to override (e.g. to bump major/minor).
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version, e.g. 1.0.0 (used for the MSI and the v<version> release tag)"
-        required: true
-        default: "1.0.0"
+        description: "Version override, e.g. 1.2.0 (leave blank to auto-increment the patch from the latest release)"
+        required: false
+        default: ""
 
 permissions:
-  contents: write   # needed to create the release
+  contents: write   # needed to read/create releases
 
 jobs:
   build-msi:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: ver
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $manual = "${{ inputs.version }}".Trim()
+          if ($manual) {
+            if ($manual -notmatch '^\d+\.\d+\.\d+$') { throw "Version override '$manual' must be X.Y.Z" }
+            $version = $manual
+            Write-Host "Using manual version override: $version"
+          } else {
+            # Find the highest vX.Y.Z release tag and bump the patch.
+            $tags = gh api "repos/${{ github.repository }}/releases?per_page=100" --jq '.[].tag_name' 2>$null
+            $max = [Version]"0.0.0"
+            foreach ($t in $tags) {
+              if ($t -match '^v?(\d+)\.(\d+)\.(\d+)$') {
+                $v = [Version]("{0}.{1}.{2}" -f $Matches[1], $Matches[2], $Matches[3])
+                if ($v -gt $max) { $max = $v }
+              }
+            }
+            if ($max -eq [Version]"0.0.0") {
+              $version = "1.0.0"
+              Write-Host "No existing vX.Y.Z release found; starting at $version"
+            } else {
+              $version = "{0}.{1}.{2}" -f $max.Major, $max.Minor, ($max.Build + 1)
+              Write-Host "Latest release v$max -> next v$version"
+            }
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
@@ -42,20 +75,20 @@ jobs:
         run: >
           wix build installer\SimCityPak.wxs
           -d "PublishDir=${{ github.workspace }}\SimCityPak\bin\Release"
-          -d "Version=${{ inputs.version }}"
+          -d "Version=${{ steps.ver.outputs.version }}"
           -o installer\SimCityPak.msi
 
       - name: Upload MSI as workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SimCityPak-${{ inputs.version }}-msi
+          name: SimCityPak-${{ steps.ver.outputs.version }}-msi
           path: installer\SimCityPak.msi
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ inputs.version }}
-          name: SimCityPak v${{ inputs.version }}
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: SimCityPak v${{ steps.ver.outputs.version }}
           files: installer\SimCityPak.msi
           generate_release_notes: true
           fail_on_unmatched_files: true
