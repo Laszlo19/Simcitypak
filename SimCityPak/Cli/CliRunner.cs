@@ -82,7 +82,7 @@ namespace SimCityPak.Cli
                     case "export-gltf":
                     {
                         var texLookup = BuildTextureLookupForInput(args.Length > 1 ? args[1] : "", args);
-                        return RunExportModels(args, ".glb", (m, p) => new GltfConverter(mesh => ResolveDiffusePng(mesh, texLookup)).Export(m, p));
+                        return RunExportModels(args, ".glb", (m, p) => new GltfConverter(mesh => ResolveTextures(mesh, texLookup)).Export(m, p));
                     }
                     case "export-texture":
                         return RunExportTextures(args);
@@ -122,9 +122,9 @@ namespace SimCityPak.Cli
             Console.WriteLine("    - a single file    -> exports just that one");
             Console.WriteLine();
             Console.WriteLine("  export-obj     : RW4 models   -> Wavefront .obj  (<name>[_meshN].obj)");
-            Console.WriteLine("  export-gltf    : RW4 models   -> binary glTF .glb (<name>[_meshN].glb),");
-            Console.WriteLine("                   with the model's diffuse texture resolved from its material");
-            Console.WriteLine("                   (searches sibling packages; override with --textures <pkg|dir>)");
+            Console.WriteLine("  export-gltf    : RW4 models   -> binary glTF .glb (<name>[_meshN].glb), with the");
+            Console.WriteLine("                   model's base color + normal + specular maps resolved from its");
+            Console.WriteLine("                   material (searches sibling packages; override --textures <pkg|dir>)");
             Console.WriteLine("  export-texture : RW4 textures -> images (--format png|jpg|tga|dds, default png)");
             Console.WriteLine("  export-prop    : .prop property lists -> readable .txt (or .json with --json),");
             Console.WriteLine("                   property names resolved; --combine merges an asset's model +");
@@ -281,20 +281,26 @@ namespace SimCityPak.Cli
         }
 
         /// <summary>
-        /// Resolves a mesh's diffuse texture as PNG bytes via its model's RW4Material
-        /// texture references, decoding the referenced resources (RW4 DXT or raw raster)
-        /// and choosing the largest non-normal-map candidate. Returns null if none resolve
-        /// (the caller then falls back to the internal-texture heuristic). Never throws.
+        /// Resolves a mesh's texture maps (base color + normal + specular) via its model's
+        /// RW4Material texture references, decoding the referenced resources (RW4 DXT or raw
+        /// raster). Returns null if none resolve (caller falls back to the internal-texture
+        /// heuristic). Never throws.
+        ///
+        /// SimCity slot layout (from the SporeModder addon's 3-texture static model): a colour
+        /// /zone map, a NORMAL map whose alpha is the specular mask, plus secondary masks. The
+        /// normal map is stored "pink" (flat ~255,128,128), i.e. R&lt;-&gt;B swizzled versus the
+        /// glTF convention (flat 128,128,255); we detect and unswizzle it, and lift its alpha
+        /// into an RGB specular-colour map.
         /// </summary>
-        private static byte[] ResolveDiffusePng(RW4Mesh mesh, Dictionary<uint, DatabaseIndex> lookup)
+        private static GltfConverter.MaterialTextures ResolveTextures(RW4Mesh mesh, Dictionary<uint, DatabaseIndex> lookup)
         {
             try
             {
                 if (lookup == null || mesh == null || mesh.model == null) return null;
 
-                byte[] bestRgba = null, fallbackRgba = null;
-                int bestW = 0, bestH = 0, fbW = 0, fbH = 0;
-                long bestArea = -1, fbArea = -1;
+                byte[] baseRgba = null, fbRgba = null, normalRgba = null;
+                int baseW = 0, baseH = 0, fbW = 0, fbH = 0, nW = 0, nH = 0;
+                long baseArea = -1, fbArea = -1, nArea = -1;
 
                 foreach (RW4Section s in mesh.model.Sections)
                 {
@@ -307,20 +313,80 @@ namespace SimCityPak.Cli
                         if (!lookup.TryGetValue(mr.TextureInstanceId, out tdi)) continue;
                         int w, h;
                         byte[] rgba = DecodeTextureResourceRgba(tdi, out w, out h);
-                        if (rgba == null) continue;
-                        // ignore strips/atlases (tiny dimensions) as a diffuse base color
-                        if (w < 16 || h < 16) continue;
+                        if (rgba == null || w < 16 || h < 16) continue;   // skip strips/atlases
                         long area = (long)w * h;
-                        if (area > fbArea) { fallbackRgba = rgba; fbW = w; fbH = h; fbArea = area; }
-                        if (GltfConverter.LooksLikeNormalMap(rgba)) continue;
-                        if (area > bestArea) { bestRgba = rgba; bestW = w; bestH = h; bestArea = area; }
+                        if (IsSimCityNormalMap(rgba))
+                        {
+                            if (area > nArea) { normalRgba = rgba; nW = w; nH = h; nArea = area; }
+                            continue;
+                        }
+                        if (area > fbArea) { fbRgba = rgba; fbW = w; fbH = h; fbArea = area; }
+                        if (!GltfConverter.LooksLikeNormalMap(rgba) && area > baseArea)
+                        { baseRgba = rgba; baseW = w; baseH = h; baseArea = area; }
                     }
                 }
-                if (bestRgba != null) return GltfConverter.RgbaToPng(bestRgba, bestW, bestH);
-                if (fallbackRgba != null) return GltfConverter.RgbaToPng(fallbackRgba, fbW, fbH);
-                return null;
+
+                byte[] colorRgba = baseRgba ?? fbRgba;
+                int cW = baseRgba != null ? baseW : fbW, cH = baseRgba != null ? baseH : fbH;
+                if (colorRgba == null && normalRgba == null) return null;
+
+                var result = new GltfConverter.MaterialTextures();
+                if (colorRgba != null) result.BaseColor = GltfConverter.RgbaToPng(colorRgba, cW, cH);
+                if (normalRgba != null)
+                {
+                    result.Normal = GltfConverter.RgbaToPng(UnswizzleNormal(normalRgba), nW, nH);
+                    byte[] spec = SpecularFromAlpha(normalRgba);
+                    if (spec != null) result.Specular = GltfConverter.RgbaToPng(spec, nW, nH);
+                }
+                return result;
             }
-            catch (Exception ex) { Logger.Exception("ResolveDiffusePng", ex); return null; }
+            catch (Exception ex) { Logger.Exception("ResolveTextures", ex); return null; }
+        }
+
+        /// <summary>SimCity's normal maps are "pink": flat areas ~ (255,128,128), i.e. the up
+        /// component is in RED with X/Y centred in the other channels. Detected by a dominant,
+        /// high red average with green and blue clustered near mid-grey.</summary>
+        private static bool IsSimCityNormalMap(byte[] rgba)
+        {
+            int n = rgba.Length / 4;
+            if (n == 0) return false;
+            long r = 0, g = 0, b = 0;
+            for (int i = 0; i < n; i++) { r += rgba[i * 4]; g += rgba[i * 4 + 1]; b += rgba[i * 4 + 2]; }
+            double ar = (double)r / n, ag = (double)g / n, ab = (double)b / n;
+            return ar > 180 && Math.Abs(ag - 128) < 45 && Math.Abs(ab - 128) < 45 && ar > ag + 60 && ar > ab + 60;
+        }
+
+        /// <summary>Converts SimCity's "pink" normal (flat 255,128,128) to the glTF convention
+        /// (flat 128,128,255) by swapping the R and B channels. Alpha set opaque.</summary>
+        private static byte[] UnswizzleNormal(byte[] rgba)
+        {
+            byte[] outp = new byte[rgba.Length];
+            for (int i = 0; i < rgba.Length; i += 4)
+            {
+                outp[i] = rgba[i + 2];      // R <- B
+                outp[i + 1] = rgba[i + 1];  // G
+                outp[i + 2] = rgba[i];      // B <- R
+                outp[i + 3] = 255;
+            }
+            return outp;
+        }
+
+        /// <summary>The specular mask is packed in the normal map's alpha channel; expand it to
+        /// an opaque greyscale RGB image for KHR_materials_specular. Returns null if alpha is
+        /// effectively constant (no usable spec data).</summary>
+        private static byte[] SpecularFromAlpha(byte[] rgba)
+        {
+            int n = rgba.Length / 4;
+            byte mn = 255, mx = 0;
+            for (int i = 0; i < n; i++) { byte a = rgba[i * 4 + 3]; if (a < mn) mn = a; if (a > mx) mx = a; }
+            if (mx - mn < 8) return null;
+            byte[] outp = new byte[rgba.Length];
+            for (int i = 0; i < n; i++)
+            {
+                byte a = rgba[i * 4 + 3];
+                outp[i * 4] = a; outp[i * 4 + 1] = a; outp[i * 4 + 2] = a; outp[i * 4 + 3] = 255;
+            }
+            return outp;
         }
 
         /// <summary>Decodes a texture resource (RW4-wrapped DXT texture or a raw raster
@@ -1036,7 +1102,7 @@ namespace SimCityPak.Cli
             int glb = 0, tex = 0, fails = 0;
             Action<byte[], string> handle = (data, baseName) =>
             {
-                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter(mesh => ResolveDiffusePng(mesh, texLookup)).Export(m, p)); }
+                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter(mesh => ResolveTextures(mesh, texLookup)).Export(m, p)); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all model " + baseName, ex); Console.WriteLine("FAIL " + baseName + " (model) :: " + ex.Message); }
                 try { tex += ExportRw4Textures(data, outDir, baseName, format); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all textures " + baseName, ex); Console.WriteLine("FAIL " + baseName + " (textures) :: " + ex.Message); }
@@ -1103,7 +1169,7 @@ namespace SimCityPak.Cli
                 byte[] data;
                 try { data = index.GetIndexData(true); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all read " + baseName, ex); continue; }
-                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter(mesh => ResolveDiffusePng(mesh, texLookup)).Export(m, p)); }
+                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter(mesh => ResolveTextures(mesh, texLookup)).Export(m, p)); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all model " + baseName, ex); }
                 try { tex += ExportRw4Textures(data, outDir, baseName, format); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all textures " + baseName, ex); }
