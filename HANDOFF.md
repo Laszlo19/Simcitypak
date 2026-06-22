@@ -137,24 +137,27 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     TODO on the .glb: DXT-compressed raster images (pixFmt != 21), .obj/.mtl textures, skeleton,
     animation. export-obj is untextured (no .mtl emitted).
 
-    **Facade-palette compositing (done — fixes the "neon" base color).** SimCity buildings have
-    **no baked albedo**. The material's slots are: u1=0 a small per-model **palette** strip
-    (float32 RGBA, D3DFMT_A32B32G32R32F = textureType **116**, e.g. 94x4), u1=1 a **region/zone
-    mask** (the false-colour atlas), u1=2 the **normal** map, u1=3 a secondary mask. The final
-    facade colour = `palette[ mask.R ]` (the mask's RED channel is a 1-D coordinate into the
-    palette, linearly sampled — the GPU does this at runtime). Determined empirically by decoding
-    both and testing index hypotheses (RED + row 0 + linear interp gave clean building colours;
-    confirmed visually). Implementation in `CliRunner`: `DecodePaletteRow0` reads the float32
-    palette's row 0 (clamped 0..1), `CompositeFacade` maps the region mask's red through it
-    (linear), and `ResolveTextures` composites when a palette is present (else keeps the raw map
-    — models with a real diffuse are unaffected). Applies to CLI export-gltf/export-all and the
-    GUI export. Verified: EP1 buildings and the Central Train Station now export natural facade
-    colours (olive/brick / dark metal) instead of the neon region atlas. Note the region mask +
-    normal atlases are often **shared** across many models (per-model palette makes them differ).
-    Also note: many buildings legitimately **share** the same base + normal atlas (e.g. 18 EP1
-    models share base 0x1188b12e / normal 0xa3791e5c) — that's correct (shared atlases indexed by
-    per-model UVs + per-model palette), NOT a bug, even though it looks like "every model has the
-    same texture".
+    **Base color: greyscale facade from palette luminance (done — replaces the neon look).**
+    SimCity buildings have **no baked albedo**. The material slots are: u1=0 a small per-model
+    **palette** strip (float32 RGBA, D3DFMT_A32B32G32R32F = textureType **116**, e.g. 69x4), u1=1
+    a **region/zone mask** (the false-colour atlas), u1=2 normal, u1=3 a secondary mask. The game
+    composites the facade colour in the GlassBox deferred shader. We ground-truthed the palette by
+    dumping its raw floats (`dump-slots` diagnostic, removed): it is a **4-row HDR material table**,
+    NOT an RGB colour LUT — row 0 is an albedo *luminance* (R≈G varying dark→bright, B pinned ~0.13),
+    rows 1-3 are HDR spec/emissive/param data (values up to 50, negatives). Tested every row +
+    2-D + tint hypotheses against the in-game look (The Academy = white/teal/green): **no
+    combination yields the real colour** — it's computed shader-side and isn't recoverable from the
+    textures. So the exporter now maps the region atlas's RED channel through palette **row-0
+    luminance** (`DecodePaletteLuminance` + `CompositeFacadeLuminance`, linear) to produce a clean
+    **greyscale** facade (light walls, dark windows, real surface detail) instead of the neon atlas.
+    Combined with the normal + specular maps this reads as a proper architectural model; The Academy
+    (mostly white) approximates well. Falls back to the raw map when no palette is present.
+    (History: an earlier attempt composited row-0 *RGB* as if it were colour — that produced flat
+    yellow/wrong colours and was reverted; the B≈0.13 pin was the giveaway it isn't colour.)
+    Also note: many buildings legitimately **share** the same region + normal atlas (e.g. 18 EP1
+    models share 0x1188b12e / 0x a3791e5c) — correct (shared atlases indexed by per-model UVs +
+    per-model palette), NOT a bug. **TODO if the real colour is ever wanted:** decode the GlassBox
+    facade shader (mask channels -> palette rows blend + HDR tonemap).
 
     **Robustness fixes (done):** meshes without FLOAT4 texcoords used to throw in
     `Vertex.TextureCoordinates` (`.First()`), failing ~34 models in a full EP1 export; `Vertex`
