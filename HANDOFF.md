@@ -151,18 +151,25 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     **Skeleton + skin (done).** `RW4Model.Read` now parses `RW4Skeleton` (0x7000c) — joint
     `HierarchyInfo` (names/parents) + bind matrices — and `Anim` (0x70001) was rewritten for
     SimCity's keyframe formats (0x101 LocRot etc.; see commit). `GltfConverter.ExtractSkin` builds
-    a glTF skin: bind position per joint = `R·(−t)` from the inverse-bind (Matrices4x4, the 3x3
-    rotation + translation, per the SporeModder importer); inverse-bind matrices are pure
-    `translate(−bindPos)` and joint nodes are translation-only, so the **bind pose is undeformed**
-    while a scene-root node carries the Z-up→Y-up −90° rotation (which then applies uniformly to
-    the skinned mesh). Per-vertex `JOINTS_0`/`WEIGHTS_0` come from the mesh's `BLENDINDICES`/
-    `BLENDWEIGHT` components (UBYTE4/SHORT4/FLOAT4, normalized); meshes with a skeleton but no blend
-    data bind fully to joint 0. Verified on DLC0: ec3eade0 (17 joints, real per-vertex weights) and
-    6b6d124f (3 joints, bind-to-root) produce valid glTF skins (joints in range, weights normalized,
-    bind pose provably undeformed). Static models (no skeleton) are unchanged.
-    **Animation — NOT yet exported (next step).** The keyframe data now parses (Anim.channels =
-    per-joint TRS+time), but emitting glTF animation samplers/channels (and resolving local-vs-
-    absolute pose space + the bind-rotation we currently fold into the root) is the remaining work.
+    a glTF skin: the glTF **inverseBindMatrix is the stored Matrices4x4** verbatim (the 0-padded
+    3x3 rows already form the column-major R^T; only element [15] needs to be 1). Joint nodes get
+    their **bind-local TRS** (decomposed from `IB[parent] * inverse(IB[i])`), so the bind pose is
+    undeformed; a scene-root node carries the Z-up→Y-up −90° rotation. Per-vertex `JOINTS_0`/
+    `WEIGHTS_0` come from the mesh's `BLENDINDICES`/`BLENDWEIGHT` components (UBYTE4/SHORT4/FLOAT4,
+    normalized); meshes with a skeleton but no blend data bind fully to joint 0.
+    **Animation (done).** `Anim.channels` (per-joint LocRot/LocRotScale keyframes = local TRS, the
+    same parent-relative space glTF node animation uses — confirmed against the SporeModder
+    importer) are emitted as one glTF animation per `Anim` section: per joint, samplers feed the
+    joint node's translation/rotation(/scale) from the keyframe TRS over time (LINEAR). Verified on
+    DLC0 ec3eade0: 1 animation, 34 channels (17 joints × T+R), times 0..1.83s, normalised
+    quaternions; valid glTF skin (joints in range, weights normalised, bind pose undeformed).
+    Static models (no skeleton) unchanged. NOTE matrix helpers (`Mat4Mul`/`Mat4Inverse`/
+    `Mat4DecomposeTRS`) live in GltfConverter; quaternion order is xyzw (glTF).
+    **Facade-building UVs (gated).** Real models (vehicles/props/characters) carry a clean FLOAT2
+    UV. Facade buildings have only a FLOAT4 texcoord that is a large WORLD-projection coordinate
+    (adjacent verts share ~identical values) — using it scrambles any flat texture. The exporter
+    now uses FLOAT2 always, FLOAT4 only when its values stay within a sane range (≤8); facade
+    buildings therefore export as clean geometry (no UVs/material) rather than a scrambled texture.
 
     **Base color: greyscale facade from palette luminance (done — replaces the neon look).**
     SimCity buildings have **no baked albedo**. The material slots are: u1=0 a small per-model
