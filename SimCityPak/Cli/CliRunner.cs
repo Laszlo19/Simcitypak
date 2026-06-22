@@ -123,8 +123,8 @@ namespace SimCityPak.Cli
             Console.WriteLine();
             Console.WriteLine("  export-obj     : RW4 models   -> Wavefront .obj  (<name>[_meshN].obj)");
             Console.WriteLine("  export-gltf    : RW4 models   -> binary glTF .glb (<name>[_meshN].glb), with the");
-            Console.WriteLine("                   model's base color + normal + specular maps resolved from its");
-            Console.WriteLine("                   material (searches sibling packages; override --textures <pkg|dir>)");
+            Console.WriteLine("                   model's base color (facade palette composited), normal + specular");
+            Console.WriteLine("                   maps from its material (searches sibling packages; --textures <pkg|dir>)");
             Console.WriteLine("  export-texture : RW4 textures -> images (--format png|jpg|tga|dds, default png)");
             Console.WriteLine("  export-prop    : .prop property lists -> readable .txt (or .json with --json),");
             Console.WriteLine("                   property names resolved; --combine merges an asset's model +");
@@ -219,6 +219,7 @@ namespace SimCityPak.Cli
         }
 
 
+
         // ----- texture resolution (for textured model export) ---------------
 
         // SimCity stores textures as separate resources, referenced from a model's
@@ -299,8 +300,8 @@ namespace SimCityPak.Cli
             {
                 if (lookup == null || mesh == null || mesh.model == null) return null;
 
-                byte[] baseRgba = null, fbRgba = null, normalRgba = null;
-                int baseW = 0, baseH = 0, fbW = 0, fbH = 0, nW = 0, nH = 0;
+                byte[] baseRgba = null, fbRgba = null, normalRgba = null, palette = null;
+                int baseW = 0, baseH = 0, fbW = 0, fbH = 0, nW = 0, nH = 0, palW = 0;
                 long baseArea = -1, fbArea = -1, nArea = -1;
 
                 foreach (RW4Section s in mesh.model.Sections)
@@ -312,6 +313,13 @@ namespace SimCityPak.Cli
                         DatabaseIndex tdi;
                         if (mr.TextureInstanceId == 0) continue;
                         if (!lookup.TryGetValue(mr.TextureInstanceId, out tdi)) continue;
+                        // The per-model facade palette is a float32 strip (textureType 116);
+                        // grab it for compositing rather than treating it as a colour map.
+                        if (palette == null)
+                        {
+                            int pw; byte[] pal = DecodePaletteRow0(tdi, out pw);
+                            if (pal != null) { palette = pal; palW = pw; continue; }
+                        }
                         int w, h;
                         byte[] rgba = DecodeTextureResourceRgba(tdi, out w, out h);
                         if (rgba == null || w < 16 || h < 16) continue;   // skip strips/atlases
@@ -330,6 +338,12 @@ namespace SimCityPak.Cli
                 byte[] colorRgba = baseRgba ?? fbRgba;
                 int cW = baseRgba != null ? baseW : fbW, cH = baseRgba != null ? baseH : fbH;
                 if (colorRgba == null && normalRgba == null) return null;
+
+                // SimCity has no baked albedo: the colour map is a region/zone atlas whose RED
+                // channel indexes the per-model palette. Composite them into the real facade
+                // colour (the game does this at runtime). Without a palette, keep the raw map.
+                if (colorRgba != null && palette != null && palW > 1)
+                    colorRgba = CompositeFacade(colorRgba, cW, cH, palette, palW);
 
                 var result = new GltfConverter.MaterialTextures();
                 if (colorRgba != null) result.BaseColor = GltfConverter.RgbaToPng(colorRgba, cW, cH);
@@ -442,6 +456,59 @@ namespace SimCityPak.Cli
         }
 
         private static uint BE(byte[] b, int o) { return (uint)((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]); }
+
+        private static byte ClampF(float f) { int v = (int)(f * 255f + 0.5f); return (byte)(v < 0 ? 0 : (v > 255 ? 255 : v)); }
+
+        /// <summary>Decodes a per-model facade palette: a small float32-RGBA texture
+        /// (D3DFMT_A32B32G32R32F = textureType 116). Returns row 0 as <paramref name="width"/>
+        /// packed RGB bytes (3/pixel, clamped 0..1 -> 0..255), or null if the resource isn't
+        /// such a palette.</summary>
+        private static byte[] DecodePaletteRow0(DatabaseIndex tdi, out int width)
+        {
+            width = 0;
+            if (tdi.TypeId != RW4_MODEL_TYPE_ID) return null;
+            try
+            {
+                var model = new RW4Model();
+                using (var ms = new MemoryStream(tdi.GetIndexData(true))) model.Read(ms);
+                var texSec = model.Sections.FirstOrDefault(x => x.TypeCode == SectionTypeCodes.Texture && x.obj is Texture);
+                if (texSec == null) return null;
+                Texture t = (Texture)texSec.obj;
+                if (t.textureType != 116) return null;      // D3DFMT_A32B32G32R32F (float32 RGBA)
+                int w = t.width; byte[] blob = t.texData.blob;
+                if (w <= 0 || blob == null || blob.Length < w * 16) return null;
+                byte[] rgb = new byte[w * 3];
+                for (int x = 0; x < w; x++)
+                {
+                    int o = x * 16;
+                    rgb[x * 3]     = ClampF(BitConverter.ToSingle(blob, o));
+                    rgb[x * 3 + 1] = ClampF(BitConverter.ToSingle(blob, o + 4));
+                    rgb[x * 3 + 2] = ClampF(BitConverter.ToSingle(blob, o + 8));
+                }
+                width = w;
+                return rgb;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Composites a region/zone mask through a facade palette, reproducing SimCity's
+        /// runtime facade colouring: each pixel's RED channel is a coordinate into the 1-D palette
+        /// (linearly sampled, as the GPU would), turning the false-colour region atlas into the
+        /// building's real colours. Keeps the mask's alpha.</summary>
+        private static byte[] CompositeFacade(byte[] maskRgba, int w, int h, byte[] palRgb, int palW)
+        {
+            byte[] outp = new byte[w * h * 4];
+            for (int i = 0; i < w * h; i++)
+            {
+                float u = maskRgba[i * 4] / 255f * (palW - 1);
+                int c0 = (int)u; if (c0 < 0) c0 = 0; if (c0 > palW - 1) c0 = palW - 1;
+                int c1 = c0 + 1 < palW ? c0 + 1 : c0; float t = u - c0;
+                for (int k = 0; k < 3; k++)
+                    outp[i * 4 + k] = (byte)(palRgb[c0 * 3 + k] + (palRgb[c1 * 3 + k] - palRgb[c0 * 3 + k]) * t);
+                outp[i * 4 + 3] = maskRgba[i * 4 + 3];
+            }
+            return outp;
+        }
 
         /// <summary>
         /// Parses RW4 bytes and writes each Mesh section via <paramref name="exporter"/>.
