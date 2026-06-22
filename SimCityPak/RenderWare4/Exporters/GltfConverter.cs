@@ -42,24 +42,96 @@ namespace SporeMaster.RenderWare4
         public GltfConverter() { }
         public GltfConverter(Func<RW4Mesh, MaterialTextures> textureProvider) { _textureProvider = textureProvider; }
 
-        /// <summary>Skeleton + per-vertex skin binding extracted from an RW4 model, ready to
-        /// emit as a glTF skin (joint node hierarchy + inverse-bind matrices + JOINTS/WEIGHTS).</summary>
+        /// <summary>One animation channel: a joint's time-stamped local TRS keyframes.</summary>
+        private class AnimTrack
+        {
+            public int Joint;
+            public float[] Times;     // [k]
+            public float[][] T;       // [k][3]
+            public float[][] R;       // [k][4] xyzw
+            public float[][] S;       // [k][3]
+            public bool HasScale;
+            public int TimesOffset, TOffset, ROffset, SOffset;   // byte offsets in the bin chunk
+            public float TimeMin, TimeMax;
+        }
+        private class AnimClip { public string Name; public List<AnimTrack> Tracks = new List<AnimTrack>(); public float Length; }
+
+        /// <summary>Skeleton + per-vertex skin binding + animations extracted from an RW4 model,
+        /// ready to emit as a glTF skin and animations.</summary>
         private class SkinData
         {
             public int JointCount;
             public int[] Parent;          // per joint: parent joint index, or -1
-            public float[][] LocalTrans;  // per joint: [3] translation relative to parent
+            public float[][] NodeT;       // per joint: bind local translation [3]
+            public float[][] NodeR;       // per joint: bind local rotation [4] xyzw
+            public float[][] NodeS;       // per joint: bind local scale [3]
             public float[] InverseBind;   // 16*JointCount floats, column-major 4x4 per joint
             public ushort[] VJoints;      // 4 per vertex
             public float[] VWeights;      // 4 per vertex
+            public List<AnimClip> Clips = new List<AnimClip>();
+        }
+
+        // ---- small column-major 4x4 matrix helpers (for bind-pose math) ----
+        private static float[] Mat4Mul(float[] a, float[] b)
+        {
+            var m = new float[16];
+            for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++)
+            { float s = 0; for (int k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; m[c * 4 + r] = s; }
+            return m;
+        }
+        private static float[] Mat4Inverse(float[] m)
+        {
+            var inv = new float[16];
+            inv[0]=m[5]*m[10]*m[15]-m[5]*m[11]*m[14]-m[9]*m[6]*m[15]+m[9]*m[7]*m[14]+m[13]*m[6]*m[11]-m[13]*m[7]*m[10];
+            inv[4]=-m[4]*m[10]*m[15]+m[4]*m[11]*m[14]+m[8]*m[6]*m[15]-m[8]*m[7]*m[14]-m[12]*m[6]*m[11]+m[12]*m[7]*m[10];
+            inv[8]=m[4]*m[9]*m[15]-m[4]*m[11]*m[13]-m[8]*m[5]*m[15]+m[8]*m[7]*m[13]+m[12]*m[5]*m[11]-m[12]*m[7]*m[9];
+            inv[12]=-m[4]*m[9]*m[14]+m[4]*m[10]*m[13]+m[8]*m[5]*m[14]-m[8]*m[6]*m[13]-m[12]*m[5]*m[10]+m[12]*m[6]*m[9];
+            inv[1]=-m[1]*m[10]*m[15]+m[1]*m[11]*m[14]+m[9]*m[2]*m[15]-m[9]*m[3]*m[14]-m[13]*m[2]*m[11]+m[13]*m[3]*m[10];
+            inv[5]=m[0]*m[10]*m[15]-m[0]*m[11]*m[14]-m[8]*m[2]*m[15]+m[8]*m[3]*m[14]+m[12]*m[2]*m[11]-m[12]*m[3]*m[10];
+            inv[9]=-m[0]*m[9]*m[15]+m[0]*m[11]*m[13]+m[8]*m[1]*m[15]-m[8]*m[3]*m[13]-m[12]*m[1]*m[11]+m[12]*m[3]*m[9];
+            inv[13]=m[0]*m[9]*m[14]-m[0]*m[10]*m[13]-m[8]*m[1]*m[14]+m[8]*m[2]*m[13]+m[12]*m[1]*m[10]-m[12]*m[2]*m[9];
+            inv[2]=m[1]*m[6]*m[15]-m[1]*m[7]*m[14]-m[5]*m[2]*m[15]+m[5]*m[3]*m[14]+m[13]*m[2]*m[7]-m[13]*m[3]*m[6];
+            inv[6]=-m[0]*m[6]*m[15]+m[0]*m[7]*m[14]+m[4]*m[2]*m[15]-m[4]*m[3]*m[14]-m[12]*m[2]*m[7]+m[12]*m[3]*m[6];
+            inv[10]=m[0]*m[5]*m[15]-m[0]*m[7]*m[13]-m[4]*m[1]*m[15]+m[4]*m[3]*m[13]+m[12]*m[1]*m[7]-m[12]*m[3]*m[5];
+            inv[14]=-m[0]*m[5]*m[14]+m[0]*m[6]*m[13]+m[4]*m[1]*m[14]-m[4]*m[2]*m[13]-m[12]*m[1]*m[6]+m[12]*m[2]*m[5];
+            inv[3]=-m[1]*m[6]*m[11]+m[1]*m[7]*m[10]+m[5]*m[2]*m[11]-m[5]*m[3]*m[10]-m[9]*m[2]*m[7]+m[9]*m[3]*m[6];
+            inv[7]=m[0]*m[6]*m[11]-m[0]*m[7]*m[10]-m[4]*m[2]*m[11]+m[4]*m[3]*m[10]+m[8]*m[2]*m[7]-m[8]*m[3]*m[6];
+            inv[11]=-m[0]*m[5]*m[11]+m[0]*m[7]*m[9]+m[4]*m[1]*m[11]-m[4]*m[3]*m[9]-m[8]*m[1]*m[7]+m[8]*m[3]*m[5];
+            inv[15]=m[0]*m[5]*m[10]-m[0]*m[6]*m[9]-m[4]*m[1]*m[10]+m[4]*m[2]*m[9]+m[8]*m[1]*m[6]-m[8]*m[2]*m[5];
+            float det = m[0]*inv[0]+m[1]*inv[4]+m[2]*inv[8]+m[3]*inv[12];
+            if (Math.Abs(det) < 1e-12f) return new float[] { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+            float id = 1f / det; for (int i = 0; i < 16; i++) inv[i] *= id;
+            return inv;
+        }
+        /// <summary>Decompose a column-major TRS matrix into translation, rotation quaternion
+        /// (xyzw) and scale.</summary>
+        private static void Mat4DecomposeTRS(float[] m, out float[] t, out float[] rq, out float[] s)
+        {
+            t = new[] { m[12], m[13], m[14] };
+            float sx = (float)Math.Sqrt(m[0]*m[0]+m[1]*m[1]+m[2]*m[2]);
+            float sy = (float)Math.Sqrt(m[4]*m[4]+m[5]*m[5]+m[6]*m[6]);
+            float sz = (float)Math.Sqrt(m[8]*m[8]+m[9]*m[9]+m[10]*m[10]);
+            if (sx < 1e-8f) sx = 1; if (sy < 1e-8f) sy = 1; if (sz < 1e-8f) sz = 1;
+            s = new[] { sx, sy, sz };
+            // rotation matrix (column-major basis) with scale removed
+            float r00=m[0]/sx, r10=m[1]/sx, r20=m[2]/sx;     // col0
+            float r01=m[4]/sy, r11=m[5]/sy, r21=m[6]/sy;     // col1
+            float r02=m[8]/sz, r12=m[9]/sz, r22=m[10]/sz;    // col2
+            float tr = r00 + r11 + r22; float qx, qy, qz, qw;
+            if (tr > 0) { float ss = (float)Math.Sqrt(tr + 1f) * 2f; qw = 0.25f*ss; qx=(r21-r12)/ss; qy=(r02-r20)/ss; qz=(r10-r01)/ss; }
+            else if (r00 > r11 && r00 > r22) { float ss=(float)Math.Sqrt(1f+r00-r11-r22)*2f; qw=(r21-r12)/ss; qx=0.25f*ss; qy=(r01+r10)/ss; qz=(r02+r20)/ss; }
+            else if (r11 > r22) { float ss=(float)Math.Sqrt(1f+r11-r00-r22)*2f; qw=(r02-r20)/ss; qx=(r01+r10)/ss; qy=0.25f*ss; qz=(r12+r21)/ss; }
+            else { float ss=(float)Math.Sqrt(1f+r22-r00-r11)*2f; qw=(r10-r01)/ss; qx=(r02+r20)/ss; qy=(r12+r21)/ss; qz=0.25f*ss; }
+            float ql=(float)Math.Sqrt(qx*qx+qy*qy+qz*qz+qw*qw); if (ql<1e-8f) ql=1;
+            rq = new[] { qx/ql, qy/ql, qz/ql, qw/ql };
         }
 
         /// <summary>
-        /// Builds skin data from the model's skeleton (RW4Skeleton) and the mesh's blend
-        /// components. The inverse-bind is a pure translation (-bindPos), and joint nodes are
-        /// translation-only, so the bind pose is undeformed; the scene root carries the up-axis
-        /// rotation, which then applies uniformly to the skinned mesh. Vertices with no blend
-        /// data bind fully to joint 0. Returns null if the model has no usable skeleton.
+        /// Builds skin data from the model's skeleton (RW4Skeleton), the mesh's blend components,
+        /// and any keyframe animations. The inverse-bind is the stored skin matrix (so glTF
+        /// computes jointGlobal*inverseBind correctly); joint nodes get their bind-local TRS; the
+        /// scene root carries the Z-up->Y-up rotation. Vertices with no blend data bind to joint 0.
+        /// Returns null if the model has no usable skeleton.
         /// </summary>
         private static SkinData ExtractSkin(RW4Mesh mesh, int vCount)
         {
@@ -73,29 +145,29 @@ namespace SporeMaster.RenderWare4
                 int n = items.Length;
                 if (n == 0 || skel.mat4 == null || skel.mat4.items == null || skel.mat4.items.Length < n) return null;
 
-                var sd = new SkinData { JointCount = n, Parent = new int[n], LocalTrans = new float[n][], InverseBind = new float[16 * n] };
-                var pos = new float[n][];     // global bind position per joint (RW4 space)
+                var sd = new SkinData { JointCount = n, Parent = new int[n], InverseBind = new float[16 * n],
+                    NodeT = new float[n][], NodeR = new float[n][], NodeS = new float[n][] };
+
+                // inverse-bind = the stored skin matrix in column-major (the 0-padded 3x3 rows are
+                // already column-major of R^T; only the [15] element needs to be 1, not 0).
+                var ibm = new float[n][];
                 for (int i = 0; i < n; i++)
                 {
-                    float[] m = skel.mat4.items[i].m;   // 3x3 rotation (row-major, 0-padded) + translation
-                    float t0 = m[12], t1 = m[13], t2 = m[14];
-                    // bindPos = R * (-t)  (matches the SporeModder importer)
-                    float px = -(m[0] * t0 + m[1] * t1 + m[2] * t2);
-                    float py = -(m[4] * t0 + m[5] * t1 + m[6] * t2);
-                    float pz = -(m[8] * t0 + m[9] * t1 + m[10] * t2);
-                    pos[i] = new[] { px, py, pz };
                     sd.Parent[i] = items[i].parent == null ? -1 : items[i].parent.index;
-                    // inverse-bind = translate(-bindPos), column-major
-                    int o = i * 16;
-                    sd.InverseBind[o + 0] = 1; sd.InverseBind[o + 5] = 1; sd.InverseBind[o + 10] = 1; sd.InverseBind[o + 15] = 1;
-                    sd.InverseBind[o + 12] = -px; sd.InverseBind[o + 13] = -py; sd.InverseBind[o + 14] = -pz;
+                    float[] src = skel.mat4.items[i].m;
+                    var ib = new float[16];
+                    Array.Copy(src, ib, 16);
+                    ib[3] = 0; ib[7] = 0; ib[11] = 0; ib[15] = 1;
+                    ibm[i] = ib;
+                    Array.Copy(ib, 0, sd.InverseBind, i * 16, 16);
                 }
+                // bind-local TRS per joint = inverse(IB[parent]) cancels: bindLocal = IB[parent] * inverse(IB[i])
                 for (int i = 0; i < n; i++)
                 {
-                    int p = sd.Parent[i];
-                    sd.LocalTrans[i] = p < 0
-                        ? new[] { pos[i][0], pos[i][1], pos[i][2] }
-                        : new[] { pos[i][0] - pos[p][0], pos[i][1] - pos[p][1], pos[i][2] - pos[p][2] };
+                    float[] bindPose = Mat4Inverse(ibm[i]);
+                    float[] local = sd.Parent[i] < 0 ? bindPose : Mat4Mul(ibm[sd.Parent[i]], bindPose);
+                    float[] t, rq, sc; Mat4DecomposeTRS(local, out t, out rq, out sc);
+                    sd.NodeT[i] = t; sd.NodeR[i] = rq; sd.NodeS[i] = sc;
                 }
 
                 // per-vertex joints + weights
@@ -118,6 +190,36 @@ namespace SporeMaster.RenderWare4
                     float sum = wt[0] + wt[1] + wt[2] + wt[3];
                     if (sum <= 0.0001f) { wt[0] = 1; sum = 1; }
                     for (int k = 0; k < 4; k++) { sd.VJoints[v * 4 + k] = idx[k]; sd.VWeights[v * 4 + k] = wt[k] / sum; }
+                }
+
+                // animations: map each channel (by joint name fnv, else by order) to a joint
+                var byFnv = new Dictionary<uint, int>();
+                for (int i = 0; i < n; i++) if (!byFnv.ContainsKey(items[i].name_fnv)) byFnv[items[i].name_fnv] = i;
+                int clipNo = 0;
+                foreach (RW4Section sec in mesh.model.Sections)
+                {
+                    Anim an = sec.obj as Anim;
+                    if (an == null || an.channels == null) continue;
+                    var clip = new AnimClip { Name = "anim" + (clipNo++), Length = an.length };
+                    for (int ci = 0; ci < an.channels.Length; ci++)
+                    {
+                        var ch = an.channels[ci];
+                        if (ch.keys == null || ch.keys.Count == 0) continue;
+                        int joint; if (!byFnv.TryGetValue(ch.id, out joint)) joint = ci < n ? ci : -1;
+                        if (joint < 0) continue;
+                        int kc = ch.keys.Count;
+                        var tr = new AnimTrack { Joint = joint, Times = new float[kc], T = new float[kc][], R = new float[kc][], S = new float[kc][], HasScale = ch.components == 0x601 };
+                        for (int k = 0; k < kc; k++)
+                        {
+                            var key = ch.keys[k];
+                            tr.Times[k] = key.time;
+                            tr.T[k] = new[] { key.tx, key.ty, key.tz };
+                            tr.R[k] = new[] { key.qx, key.qy, key.qz, key.qw };
+                            tr.S[k] = new[] { key.sx, key.sy, key.sz };
+                        }
+                        clip.Tracks.Add(tr);
+                    }
+                    if (clip.Tracks.Count > 0) sd.Clips.Add(clip);
                 }
                 return sd;
             }
@@ -160,9 +262,25 @@ namespace SporeMaster.RenderWare4
             var tris = mesh.triangles.triangles;
             int vCount = verts.Length;
 
-            // Some meshes (shadow/collision) carry no texture coordinates; without UVs a
-            // material can't map, so export geometry only and skip the textures.
-            bool hasUv = vCount > 0 && verts[0].HasTextureCoordinates;
+            // Decide whether the mesh has a usable UV. A FLOAT2 texcoord is a real per-vertex
+            // UV. A FLOAT4 texcoord is a real UV on some models but a large world-projection
+            // coordinate on facade buildings (which would scramble any flat texture) — so only
+            // accept FLOAT4 when its values stay in a sane UV range. Otherwise export geometry
+            // only (no UVs/material).
+            bool hasUv = false;
+            if (vCount > 0 && verts[0].HasTextureCoordinates)
+            {
+                bool hasFloat2 = false;
+                foreach (var c in verts[0].VertexComponents)
+                    if (c.Usage == D3DDECLUSAGE.D3DDECLUSAGE_TEXCOORD && c is VertexFloat2Value) { hasFloat2 = true; break; }
+                if (hasFloat2) hasUv = true;
+                else
+                {
+                    float mx = 0; float u, vtmp;
+                    foreach (Vertex vv in verts) { if (vv.TryGetUV(out u, out vtmp)) { float a = Math.Max(Math.Abs(u), Math.Abs(vtmp)); if (a > mx) mx = a; } }
+                    hasUv = mx <= 8f;     // sane 0..1-ish (with a little tiling); facades are far larger
+                }
+            }
 
             // Prefer the caller's resolver (RW4Material -> external texture resources);
             // fall back to the internal-texture heuristic for the base color.
@@ -243,6 +361,25 @@ namespace SporeMaster.RenderWare4
                     for (int i = 0; i < vCount * 4; i++) bw.Write(skin.VWeights[i]);
                     Pad4(bw, bin); ibmOffset = (int)bin.Position;
                     for (int i = 0; i < skin.InverseBind.Length; i++) bw.Write(skin.InverseBind[i]);
+
+                    // animation keyframe buffers (time inputs + TRS outputs per track)
+                    foreach (var clip in skin.Clips)
+                        foreach (var tr in clip.Tracks)
+                        {
+                            Pad4(bw, bin); tr.TimesOffset = (int)bin.Position;
+                            float tmin = float.MaxValue, tmax = float.MinValue;
+                            for (int k = 0; k < tr.Times.Length; k++) { bw.Write(tr.Times[k]); if (tr.Times[k] < tmin) tmin = tr.Times[k]; if (tr.Times[k] > tmax) tmax = tr.Times[k]; }
+                            tr.TimeMin = tmin; tr.TimeMax = tmax;
+                            Pad4(bw, bin); tr.TOffset = (int)bin.Position;
+                            for (int k = 0; k < tr.T.Length; k++) { bw.Write(tr.T[k][0]); bw.Write(tr.T[k][1]); bw.Write(tr.T[k][2]); }
+                            Pad4(bw, bin); tr.ROffset = (int)bin.Position;
+                            for (int k = 0; k < tr.R.Length; k++) { bw.Write(tr.R[k][0]); bw.Write(tr.R[k][1]); bw.Write(tr.R[k][2]); bw.Write(tr.R[k][3]); }
+                            if (tr.HasScale)
+                            {
+                                Pad4(bw, bin); tr.SOffset = (int)bin.Position;
+                                for (int k = 0; k < tr.S.Length; k++) { bw.Write(tr.S[k][0]); bw.Write(tr.S[k][1]); bw.Write(tr.S[k][2]); }
+                            }
+                        }
                 }
 
                 bw.Flush();
@@ -347,7 +484,12 @@ namespace SporeMaster.RenderWare4
                 nodes.Add(new Dictionary<string, object> { ["mesh"] = 0, ["skin"] = 0 });                                       // 1 mesh
                 for (int i = 0; i < skin.JointCount; i++)
                 {
-                    var jn = new Dictionary<string, object> { ["translation"] = new object[] { skin.LocalTrans[i][0], skin.LocalTrans[i][1], skin.LocalTrans[i][2] } };
+                    var jn = new Dictionary<string, object>
+                    {
+                        ["translation"] = new object[] { skin.NodeT[i][0], skin.NodeT[i][1], skin.NodeT[i][2] },
+                        ["rotation"] = new object[] { skin.NodeR[i][0], skin.NodeR[i][1], skin.NodeR[i][2], skin.NodeR[i][3] },
+                        ["scale"] = new object[] { skin.NodeS[i][0], skin.NodeS[i][1], skin.NodeS[i][2] }
+                    };
                     var kids = new List<object>();
                     for (int c = 0; c < skin.JointCount; c++) if (skin.Parent[c] == i) kids.Add(jointBase + c);
                     if (kids.Count > 0) jn["children"] = kids.ToArray();
@@ -366,6 +508,41 @@ namespace SporeMaster.RenderWare4
                 sceneNodes = new object[] { 0 };
             }
 
+            // ----- animations: one glTF animation per clip; per track, samplers feeding the
+            // joint node's translation/rotation/(scale) from the keyframe TRS over time. -----
+            object[] animations = null;
+            if (hasSkin && skin.Clips.Count > 0)
+            {
+                const int jointBase = 2;
+                var animList = new List<object>();
+                foreach (var clip in skin.Clips)
+                {
+                    var samplers = new List<object>();
+                    var channels = new List<object>();
+                    foreach (var tr in clip.Tracks)
+                    {
+                        int node = jointBase + tr.Joint;
+                        int kc = tr.Times.Length;
+                        // shared time input accessor for this track
+                        int bvT = bufferViews.Count; bufferViews.Add(new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = tr.TimesOffset, ["byteLength"] = kc * 4 });
+                        int inAcc = accessors.Count; accessors.Add(new Dictionary<string, object> { ["bufferView"] = bvT, ["componentType"] = COMP_FLOAT, ["count"] = kc, ["type"] = "SCALAR", ["min"] = new object[] { tr.TimeMin }, ["max"] = new object[] { tr.TimeMax } });
+
+                        Action<int, int, string, string> addChannel = (off, comps, type, path) =>
+                        {
+                            int bv = bufferViews.Count; bufferViews.Add(new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = off, ["byteLength"] = kc * comps * 4 });
+                            int outAcc = accessors.Count; accessors.Add(new Dictionary<string, object> { ["bufferView"] = bv, ["componentType"] = COMP_FLOAT, ["count"] = kc, ["type"] = type });
+                            int si = samplers.Count; samplers.Add(new Dictionary<string, object> { ["input"] = inAcc, ["output"] = outAcc, ["interpolation"] = "LINEAR" });
+                            channels.Add(new Dictionary<string, object> { ["sampler"] = si, ["target"] = new Dictionary<string, object> { ["node"] = node, ["path"] = path } });
+                        };
+                        addChannel(tr.TOffset, 3, "VEC3", "translation");
+                        addChannel(tr.ROffset, 4, "VEC4", "rotation");
+                        if (tr.HasScale) addChannel(tr.SOffset, 3, "VEC3", "scale");
+                    }
+                    animList.Add(new Dictionary<string, object> { ["name"] = clip.Name, ["samplers"] = samplers.ToArray(), ["channels"] = channels.ToArray() });
+                }
+                animations = animList.ToArray();
+            }
+
             var gltf = new Dictionary<string, object>
             {
                 ["asset"] = new Dictionary<string, object> { ["version"] = "2.0", ["generator"] = "SimCityPak glTF exporter" },
@@ -378,6 +555,7 @@ namespace SporeMaster.RenderWare4
                 ["accessors"] = accessors.ToArray()
             };
             if (hasSkin) gltf["skins"] = gltfSkin;
+            if (animations != null) gltf["animations"] = animations;
 
             if (hasMaterial)
             {
