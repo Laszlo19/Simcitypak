@@ -360,6 +360,26 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     (committed; copied next to the exe via a `<Content>` item with CopyToOutputDirectory). The
     old loose vgmstream that lived in `simcity sounds\_tools\` has since been removed — the
     app's bundled copy is now authoritative.
+  - `export-video <input> <outputDir> [--mp4]` — EA VP60 video (type id `0x376840D7`) → raw
+    `.vp6` always, plus a re-encoded `.mp4` when `--mp4` is given and ffmpeg is on PATH. The
+    resource bytes are an EA **"MVhd"** container holding a VP6 stream (e.g. 1280×720, 29.97fps);
+    ffmpeg's EA demuxer reads them directly (so the raw `.vp6` plays in VLC). The embedded EA audio
+    sub-stream is NOT decodable by ffmpeg's EA demuxer ("revision2=23 not implemented"), so the mp4
+    transcode is **video-only** (`-an`, libx264 yuv420p). Helpers `CliRunner.FindFfmpeg()` (checks
+    `Tools\ffmpeg\ffmpeg.exe` next to the exe, then PATH) and `CliRunner.TranscodeVideoToMp4(...)`
+    are public so the GUI shares them. Verified end-to-end: single file, `--mp4` (86.75s 720p →
+    valid h264 mp4), and package extraction (2 videos out of `SimCity_App.package`).
+    **GUI:** selecting a video resource now opens a dedicated **`ViewVideo`** (`Views\ViewVideo.xaml`)
+    showing codec/resolution/size + "Save raw video (.vp6)…" and "Export as MP4 (ffmpeg)…" buttons
+    (mp4 disabled when ffmpeg is absent; transcode runs on a background Task with a wait cursor).
+    `ViewSelector` routes `0x376840D7` to `viewVideo` BEFORE the hex fallback — see the OOM fix below.
+    There are only 3 video resources in the base game (2 in `SimCity_App`, 1 in `Data.package`).
+    **OOM crash fixed (the reported bug):** selecting a video used to fall through to the hex view
+    (`viewData`/`ViewHex`), whose `ByteArrayToIndexedHexStringConverter` builds one small string per
+    8-byte row — for a ~90 MB video that's millions of allocations + a multi-hundred-MB string →
+    repeated `OutOfMemoryException` dialogs and a freeze. `ViewHex` now **caps rendering to the first
+    256 KB** (with a truncation note) and **blocks Save when truncated** (saving the partial text
+    would corrupt the resource); this defends every oversized resource, not just video.
   - `export-all <input> <outputDir> [--locale]` — every model → `.glb` AND its textures → `.dds`
     into one folder (localized names). Core is `public CliRunner.ExportAllToFolder(IEnumerable
     <DatabaseIndex>, outDir, localeFile)`, also called by the **GUI** menu *File ▸ Export all

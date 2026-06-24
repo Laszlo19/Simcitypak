@@ -1,0 +1,37 @@
+<UserControl x:Class="SimCityPak.ViewVideo"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:simCityPak="clr-namespace:SimCityPak"
+             mc:Ignorable="d"
+             d:DesignHeight="320" d:DesignWidth="520"
+             DataContextChanged="OnDataContextChanged">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="EA VP60 Video" FontSize="18" FontWeight="Bold" Margin="0,0,0,8"/>
+
+        <TextBlock Grid.Row="1" x:Name="txtInfo" FontFamily="Consolas" TextWrapping="Wrap"
+                   Text="" Margin="0,0,0,12"/>
+
+        <TextBlock Grid.Row="2" TextWrapping="Wrap" Foreground="#555" Margin="0,0,0,8"
+                   Text="This resource cannot be previewed in the app. Export it to a file: the raw .vp6 plays in VLC and other ffmpeg-based players; the MP4 option re-encodes it for universal playback (requires ffmpeg on PATH)."/>
+
+        <TextBlock Grid.Row="3" x:Name="txtStatus" TextWrapping="Wrap" Foreground="#206020"
+                   VerticalAlignment="Top" Margin="0,4,0,0"/>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Left">
+            <Button x:Name="btnSaveRaw" Content="Save raw video (.vp6)…" MinWidth="160" Height="28"
+                    Margin="0,0,10,0" Padding="10,0" Click="btnSaveRaw_Click"/>
+            <Button x:Name="btnExportMp4" Content="Export as MP4 (ffmpeg)…" MinWidth="160" Height="28"
+                    Padding="10,0" Click="btnExportMp4_Click"/>
+        </StackPanel>
+    </Grid>
+</UserControl>

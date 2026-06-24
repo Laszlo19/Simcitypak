@@ -34,6 +34,15 @@ namespace SimCityPak
                       return element.FindResource("viewPath") as DataTemplate;
                    }
                 }
+                // EA VP60 Video (0x376840D7): never fall through to the hex view — these
+                // resources are tens of MB and the hex converter OOMs on them.
+                if (index.Index.TypeId == 0x376840D7)
+                {
+                    if (element.TryFindResource("viewVideo") != null)
+                    {
+                        return element.FindResource("viewVideo") as DataTemplate;
+                    }
+                }
                 if (viewer != "")
                 {
                     return element.FindResource(viewer) as DataTemplate;

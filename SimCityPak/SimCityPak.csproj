@@ -409,6 +409,9 @@
     <Compile Include="Views\ViewHex.xaml.cs">
       <DependentUpon>ViewHex.xaml</DependentUpon>
     </Compile>
+    <Compile Include="Views\ViewVideo.xaml.cs">
+      <DependentUpon>ViewVideo.xaml</DependentUpon>
+    </Compile>
     <Compile Include="Views\PropertyViews\ViewKeyProperty.xaml.cs">
       <DependentUpon>ViewKeyProperty.xaml</DependentUpon>
     </Compile>
@@ -663,6 +666,10 @@
       <Generator>MSBuild:Compile</Generator>
     </Page>
     <Page Include="Views\ViewHex.xaml">
+      <SubType>Designer</SubType>
+      <Generator>MSBuild:Compile</Generator>
+    </Page>
+    <Page Include="Views\ViewVideo.xaml">
       <SubType>Designer</SubType>
       <Generator>MSBuild:Compile</Generator>
     </Page>
