@@ -243,10 +243,13 @@ namespace SporeMaster.RenderWare4
 
         // SimCity animated buildings ("shell-rigs") carry no standard BLENDINDICES; instead the
         // moving sub-parts are flagged in a TEXCOORD UBYTE4 channel whose value is neutral
-        // (127,127,127,0) for the static shell and a distinct value per moving part. Each moving
-        // group's geometry sits at one animated bone's pivot, so we rigidly bind it there (weight 1)
-        // and let the existing bone animation move it. (Verified against the in-game models: the
-        // group POSITION centroids land on the bones' first-keyframe translations.)
+        // (127,127,127,0) for the static shell and a distinct value per moving part. The moving
+        // geometry sits at the animated bones' pivots, so we rigidly bind each moving vertex
+        // (weight 1) to its NEAREST non-root bone and let the existing bone animation move it.
+        // (Verified against the in-game models: moving-vertex positions land on the bones'
+        // first-keyframe translations.) Per-vertex (not per-group) nearest-bone assignment is what
+        // disambiguates buildings whose bones cluster tightly — a single marker value there can
+        // cover several small parts on different nearby bones.
         private const int ShellNeutralMarker = (127 << 24) | (127 << 16) | (127 << 8) | 0;
 
         private static bool TryBuildRigidShellSkin(VertexBuffer verts, int vCount, float[][] ibm, SkinData sd)
@@ -277,39 +280,27 @@ namespace SporeMaster.RenderWare4
             }
             if (!hasMarker) return false;   // no marker channel -> not a shell-rig we can decode
 
-            // centroid of each non-neutral (moving) marker group
-            var sum = new Dictionary<int, double[]>();   // key -> {sx, sy, sz, count}
+            // per-vertex: static (neutral marker) -> root joint 0; moving -> nearest non-root bone.
+            int moving = 0;
             for (int v = 0; v < vCount; v++)
             {
-                if (markerKey[v] == ShellNeutralMarker) continue;
-                double[] a; if (!sum.TryGetValue(markerKey[v], out a)) { a = new double[4]; sum[markerKey[v]] = a; }
-                a[0] += pos[v][0]; a[1] += pos[v][1]; a[2] += pos[v][2]; a[3]++;
-            }
-            if (sum.Count == 0) return false;   // nothing flagged moving -> let it stay static
-
-            // assign each moving group to the nearest non-root bone pivot
-            var groupBone = new Dictionary<int, int>();
-            foreach (var kv in sum)
-            {
-                double cx = kv.Value[0] / kv.Value[3], cy = kv.Value[1] / kv.Value[3], cz = kv.Value[2] / kv.Value[3];
-                int best = 1; double bestD = double.MaxValue;
-                for (int j = 1; j < n; j++)
+                int j = 0;
+                if (markerKey[v] != ShellNeutralMarker)
                 {
-                    double dx = pivot[j][0] - cx, dy = pivot[j][1] - cy, dz = pivot[j][2] - cz;
-                    double d = dx * dx + dy * dy + dz * dz;
-                    if (d < bestD) { bestD = d; best = j; }
+                    moving++;
+                    float x = pos[v][0], y = pos[v][1], z = pos[v][2];
+                    double bestD = double.MaxValue;
+                    for (int b = 1; b < n; b++)
+                    {
+                        double dx = pivot[b][0] - x, dy = pivot[b][1] - y, dz = pivot[b][2] - z;
+                        double d = dx * dx + dy * dy + dz * dz;
+                        if (d < bestD) { bestD = d; j = b; }
+                    }
                 }
-                groupBone[kv.Key] = best;
-            }
-
-            // per-vertex: static -> root joint 0, moving -> its group's bone, full weight
-            for (int v = 0; v < vCount; v++)
-            {
-                int j = 0, b;
-                if (markerKey[v] != ShellNeutralMarker && groupBone.TryGetValue(markerKey[v], out b)) j = b;
                 sd.VJoints[v * 4] = (ushort)j; sd.VJoints[v * 4 + 1] = 0; sd.VJoints[v * 4 + 2] = 0; sd.VJoints[v * 4 + 3] = 0;
                 sd.VWeights[v * 4] = 1f; sd.VWeights[v * 4 + 1] = 0; sd.VWeights[v * 4 + 2] = 0; sd.VWeights[v * 4 + 3] = 0;
             }
+            if (moving == 0) return false;   // nothing flagged moving -> let it stay static
             return true;
         }
 
