@@ -9,6 +9,7 @@
         <ContextMenu x:Key="rowContextMenu" Opened="ContextMenu_Opened">
             <MenuItem Header="Export..." Name="mnuExportInstance" Click="mnuExportInstance_Click" />
             <MenuItem Header="Export Properties (TXT/JSON)..." Name="mnuExportProperties" Click="mnuExportProperties_Click" />
+            <MenuItem Header="Export to MP4..." Name="mnuExportMp4" Tag="video" Click="mnuExportMp4_Click" Visibility="Collapsed" />
             <MenuItem Header="Export to Package..." Name="mnuExportPackage" Click="mnuExportPackage_Click"  />
             <MenuItem Header="Advanced Export..." Name="mnuExportCopy" Click="mnuExportCopy_Click"  />
             <MenuItem Header="Delete" Name="mnuDeleteInstance" IsCheckable="True" IsChecked="{Binding Path=Deleted, UpdateSourceTrigger=PropertyChanged}"/>

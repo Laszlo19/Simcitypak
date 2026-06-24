@@ -921,7 +921,79 @@ namespace SimCityPak
 
         private void ContextMenu_Opened(object sender, RoutedEventArgs e)
         {
+            // Show video-only items (Tag="video") only when the right-clicked
+            // resource is an EA VP60 video (type 0x376840D7).
+            System.Windows.Controls.ContextMenu cm = sender as System.Windows.Controls.ContextMenu;
+            if (cm == null) return;
+            DatabaseIndex index = cm.DataContext as DatabaseIndex;
+            bool isVideo = index != null && index.TypeId == 0x376840D7;
+            foreach (object item in cm.Items)
+            {
+                MenuItem mi = item as MenuItem;
+                if (mi != null && (mi.Tag as string) == "video")
+                    mi.Visibility = isVideo ? Visibility.Visible : Visibility.Collapsed;
+            }
+        }
 
+        /// <summary>Right-click "Export to MP4..." for an EA VP60 video resource.
+        /// Re-encodes the resource to H.264 .mp4 via ffmpeg (shared with the CLI).</summary>
+        private void mnuExportMp4_Click(object sender, RoutedEventArgs e)
+        {
+            DatabaseIndex index = (DatabaseIndex)((MenuItem)sender).DataContext;
+            if (index.TypeId != 0x376840D7)
+            {
+                System.Windows.MessageBox.Show("This resource is not an EA VP60 video file.",
+                    "SimCityPak", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            string ffmpeg = Cli.CliRunner.FindFfmpeg();
+            if (ffmpeg == null)
+            {
+                System.Windows.MessageBox.Show(
+                    "ffmpeg was not found on PATH (or in Tools\\ffmpeg next to the app), so the video " +
+                    "cannot be re-encoded to MP4.\n\nYou can still export the raw .vp6 (which plays in " +
+                    "VLC) via Export... or by opening the resource.",
+                    "ffmpeg not found", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            SaveFileDialog dlg = new SaveFileDialog();
+            dlg.Filter = "MP4 video|*.mp4";
+            dlg.DefaultExt = ".mp4";
+            dlg.FileName = Path.GetFileNameWithoutExtension(index.GetExportFileName()) + ".mp4";
+            if (!dlg.ShowDialog().GetValueOrDefault(false)) return;
+
+            string outPath = dlg.FileName;
+            byte[] data = index.GetIndexData(true);
+            Logger.Info("GUI: export video -> mp4 -> " + outPath);
+            System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
+
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                string tmp = Path.Combine(Path.GetTempPath(),
+                    "scp_video_" + Guid.NewGuid().ToString("N") + ".vp6");
+                string error;
+                bool ok;
+                try
+                {
+                    File.WriteAllBytes(tmp, data);
+                    ok = Cli.CliRunner.TranscodeVideoToMp4(ffmpeg, tmp, outPath, out error);
+                }
+                catch (Exception ex) { ok = false; error = ex.Message; Logger.Exception("GUI export-mp4", ex); }
+                finally { try { File.Delete(tmp); } catch { } }
+
+                Dispatcher.Invoke(() =>
+                {
+                    System.Windows.Input.Mouse.OverrideCursor = null;
+                    if (ok)
+                        System.Windows.MessageBox.Show("Exported MP4:\n" + outPath, "Export to MP4",
+                            MessageBoxButton.OK, MessageBoxImage.Information);
+                    else
+                        System.Windows.MessageBox.Show("ffmpeg failed: " + error, "Export to MP4",
+                            MessageBoxButton.OK, MessageBoxImage.Error);
+                });
+            });
         }
     }
 
