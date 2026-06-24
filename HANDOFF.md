@@ -177,29 +177,33 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     armature without weights (no deformation). This avoids the misleading "empty animation" on
     building models whose only motion is on unweighted attachment bones.
 
-    **Animated buildings = lot/prop COMPOSITION, not single-mesh skinning (important).** Investigated
-    from a user report that the Oil Refinery animates in-game but exported static. Findings on
-    `SimCity_Game.package` (via the localized-name search): the Oil Refinery (`0xa50fc927`), Oil
-    Pumpjack, Oil Well, Water Pump, Oil/Conventional/Clean Power Plants, Petroleum HQ, etc. ALL
-    have a **skeleton (4–29 joints) + several Anim sections, but NO per-vertex blend data** and **no
-    per-vertex bone index in ANY vertex channel** (checked POSITION/NORMAL/TANGENT/COLOR + all 3
-    TEXCOORDs — the only spare UBYTE4 holds `{0,127,254}` mask values, not joint indices). So a
-    building's RW4 model is just the **static shell**; its skeleton bones are **attachment points**
-    that the engine animates and onto which it hangs **separate** moving sub-model resources (pump
-    arms, flare stacks, spinning signs, etc.). The visible in-game animation is the assembled LOT,
-    not deformation of one mesh. (The SporeModder importer reaches the same dead-end — it leaves
-    these meshes static.)
-    Consequence for export: a single-model `.glb` cannot reproduce these animations; we export the
-    shell statically (correct, no fake empty animation). Truly skinned models (per-vertex weights —
-    characters, some vehicles/props) DO animate via the skin path above.
-    **TODO if someone wants real animated buildings:** implement lot/prop composition — read the
-    building's LOT/prop definition to find which child model resources attach to which bone (by the
-    bone's name fnv / a placement prop), export them as a glTF node tree parented to the animated
-    joint nodes (each child a static mesh under its bone). The bone animation already parses
-    (`Anim.channels`); what's missing is the model↔bone attachment mapping, which lives in the
-    prop/lot data (see the `--combine` prop investigation in §4 for how assets group), plus loading
-    the child model resources (often in sibling packages). This is a sizable feature, well beyond
-    per-model export, and is the only way to make the Oil Refinery etc. move in an export.
+    **Animated buildings = in-mesh "shell-rig" skinning (DONE).** The animation of buildings like the
+    Oil Refinery is **intrinsic to the model**, not lot composition: the main building model (and some
+    add-on **modules** — player-addable expansions) each contain their own moving parts. ~1352 building
+    models are "shell-rigs": a **single mesh + a skeleton whose bones genuinely animate (len ~0.96s)**
+    but **no standard BLENDINDICES/BLENDWEIGHT** — which is why the normal skin path (and SporeModder)
+    left them static. (Earlier dead-end, now corrected: the model prop's placement arrays
+    `0x02a907b5/b6` are the MODULE placements; `ecoUnitBinDraw*` are dynamic gameplay props — cars
+    `kResourceIDCarW1..3`, effects — whose bin ids are runtime handles that resolve to no resource.
+    Do NOT chase those for geometry.)
+    **The decode (the key finding):** the moving sub-parts ARE in the mesh, flagged in the
+    **TEXCOORD index-1 UBYTE4** channel: value `(127,127,127,0)` = static shell, anything else = a
+    moving vertex. Each distinct marker group's POSITION centroid sits right at one **animated bone's
+    pivot** (verified by correlating group centroids with each bone's first-keyframe translation — the
+    skeleton is flat, so key[0].translation ≈ bone pivot). Implementation: `GltfConverter.ExtractSkin`,
+    when a skeleton + animation exist but there's no BLENDINDICES, calls **`TryBuildRigidShellSkin`** —
+    static verts bind to the root joint, each moving marker-group binds rigidly (weight 1) to the
+    nearest animated bone pivot; the existing inverse-bind + animation machinery then moves them.
+    Verified on the Oil Refinery LOD2 (`0x4e20cb4c`, 9 bones): exported `.glb` has 1 skin + 3
+    animations and `JOINTS_0` binds the moving groups to bones 1/3/4/7/8 (the static shell to 0) — it
+    animates in Blender. The decode is generic (no per-model data), so it applies to all shell-rigs.
+    Truly skinned models (real per-vertex weights — characters, some vehicles/props) still use the
+    standard BLENDINDICES path; static models are unaffected.
+    **Known limitation / TODO:** group→bone is by nearest-centroid, which can misassign when bones are
+    tightly clustered (<~3 units apart, e.g. building `0xa995cc11` has 4 bones at ~(0,1,13)). The
+    TEXCOORD1 XYZ direction bytes (`{0,127,254}` axis pattern) likely disambiguate within a cluster —
+    decode them to make those cases exact. Also untested on LOD1 full-detail meshes and modules
+    (same code path, should work).
     **Facade-building UVs (gated).** Real models (vehicles/props/characters) carry a clean FLOAT2
     UV. Facade buildings have only a FLOAT4 texcoord that is a large WORLD-projection coordinate
     (adjacent verts share ~identical values) — using it scrambles any flat texture. The exporter
