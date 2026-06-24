@@ -199,11 +199,22 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     animates in Blender. The decode is generic (no per-model data), so it applies to all shell-rigs.
     Truly skinned models (real per-vertex weights — characters, some vehicles/props) still use the
     standard BLENDINDICES path; static models are unaffected.
-    **Known limitation / TODO:** group→bone is by nearest-centroid, which can misassign when bones are
-    tightly clustered (<~3 units apart, e.g. building `0xa995cc11` has 4 bones at ~(0,1,13)). The
-    TEXCOORD1 XYZ direction bytes (`{0,127,254}` axis pattern) likely disambiguate within a cluster —
-    decode them to make those cases exact. Also untested on LOD1 full-detail meshes and modules
-    (same code path, should work).
+    **Clustered bones + LOD1/modules (done).** Binding is now **per-vertex nearest bone** (not
+    per-group centroid): each moving vertex binds to its own closest non-root bone. This fixes
+    tightly-clustered skeletons — e.g. `0xa995cc11` has 4 bones bunched at ~(0,1,13) sharing marker
+    values; per-vertex assignment now spreads its verts across bones 1-4 instead of dumping them all
+    on bone 1. Validated: LOD1 full-detail refinery (`0xa50fc927`, 13555 verts → skin + 3 anims,
+    moving parts on bones 1/3/4/5/6/7/8) and a module (Oil Pumpjack `0x68cf9705` → skin + 3 anims,
+    bones 2/3/4/5) both animate. (LOD = level of detail: LOD1 full / LOD2-4 progressively simpler
+    distance meshes. Modules = player-addable building expansions, each its own model; some animate.)
+    **Possible remaining weirdness:** per-vertex nearest can *tear* a single rigid part if it
+    physically straddles the midpoint between two bones (some verts snap to the neighbor). Not yet
+    observed; if it shows up, use a hybrid (bind a marker group rigidly to its dominant bone, fall
+    back to per-vertex only when the group's nearest-bone votes are genuinely split). Also: ~268
+    models still fail to LOAD (so never reach export) on `RW4Material: 0x2D marker not found` in
+    `RW4Material.Read` — an undecoded material layout, the biggest single export-failure cause in the
+    user's log (others: T001 triangle-format, NRE, Unknown2 section type). Fixing that parser is
+    separate from animation.
     **Facade-building UVs (gated).** Real models (vehicles/props/characters) carry a clean FLOAT2
     UV. Facade buildings have only a FLOAT4 texcoord that is a large WORLD-projection coordinate
     (adjacent verts share ~identical values) — using it scrambles any flat texture. The exporter
