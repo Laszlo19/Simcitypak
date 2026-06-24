@@ -193,10 +193,19 @@ namespace SporeMaster.RenderWare4
                     if (sum <= 0.0001f) { wt[0] = 1; sum = 1; }
                     for (int k = 0; k < 4; k++) { sd.VJoints[v * 4 + k] = idx[k]; sd.VWeights[v * 4 + k] = wt[k] / sum; }
                 }
-                // Without real per-vertex blend data every vertex would bind to joint 0 (the static
-                // root), so any animation of the other joints moves nothing — a misleading "empty"
-                // animation. Skip the skin entirely for such meshes; they export as a static model.
-                if (!meshHasBlend) return null;
+                // No standard per-vertex blend data. SimCity "shell-rig" buildings (Oil Refinery
+                // etc.) still animate: their moving sub-parts are flagged in a TEXCOORD UBYTE4
+                // channel (neutral 127,127,127,0 = static shell, anything else = a moving part) and
+                // each moving group sits at one animated bone. Recover that as a rigid skin (static
+                // verts -> root joint, each moving group -> nearest bone), so the existing bone
+                // animation actually moves them. Only attempt it when the model has an animation;
+                // otherwise the mesh has no recoverable motion and exports as a static model.
+                if (!meshHasBlend)
+                {
+                    bool hasAnim = false;
+                    foreach (RW4Section sec in mesh.model.Sections) if (sec.obj is Anim) { hasAnim = true; break; }
+                    if (!hasAnim || !TryBuildRigidShellSkin(verts, vCount, ibm, sd)) return null;
+                }
 
                 // animations: map each channel (by joint name fnv, else by order) to a joint
                 var byFnv = new Dictionary<uint, int>();
@@ -230,6 +239,78 @@ namespace SporeMaster.RenderWare4
                 return sd;
             }
             catch { return null; }
+        }
+
+        // SimCity animated buildings ("shell-rigs") carry no standard BLENDINDICES; instead the
+        // moving sub-parts are flagged in a TEXCOORD UBYTE4 channel whose value is neutral
+        // (127,127,127,0) for the static shell and a distinct value per moving part. Each moving
+        // group's geometry sits at one animated bone's pivot, so we rigidly bind it there (weight 1)
+        // and let the existing bone animation move it. (Verified against the in-game models: the
+        // group POSITION centroids land on the bones' first-keyframe translations.)
+        private const int ShellNeutralMarker = (127 << 24) | (127 << 16) | (127 << 8) | 0;
+
+        private static bool TryBuildRigidShellSkin(VertexBuffer verts, int vCount, float[][] ibm, SkinData sd)
+        {
+            int n = sd.JointCount;
+            if (n < 2) return false;   // need at least one non-root bone to bind moving parts to
+
+            // bone global bind pivot = translation of the inverse of each inverse-bind matrix
+            var pivot = new float[n][];
+            for (int i = 0; i < n; i++) { var bp = Mat4Inverse(ibm[i]); pivot[i] = new[] { bp[12], bp[13], bp[14] }; }
+
+            var markerKey = new int[vCount];
+            var pos = new float[vCount][];
+            bool hasMarker = false;
+            for (int v = 0; v < vCount; v++)
+            {
+                int key = ShellNeutralMarker; float x = 0, y = 0, z = 0;
+                var comps = verts[v].VertexComponents;
+                if (comps != null)
+                    foreach (var c in comps)
+                    {
+                        if (c.Usage == D3DDECLUSAGE.D3DDECLUSAGE_POSITION && c is VertexFloat3Value)
+                        { var p = (VertexFloat3Value)c; x = p.X; y = p.Y; z = p.Z; }
+                        else if (c.Usage == D3DDECLUSAGE.D3DDECLUSAGE_TEXCOORD && c is VertexUByte4Value)
+                        { var u = (VertexUByte4Value)c; key = (u.X << 24) | (u.Y << 16) | (u.Z << 8) | u.W; hasMarker = true; }
+                    }
+                markerKey[v] = key; pos[v] = new[] { x, y, z };
+            }
+            if (!hasMarker) return false;   // no marker channel -> not a shell-rig we can decode
+
+            // centroid of each non-neutral (moving) marker group
+            var sum = new Dictionary<int, double[]>();   // key -> {sx, sy, sz, count}
+            for (int v = 0; v < vCount; v++)
+            {
+                if (markerKey[v] == ShellNeutralMarker) continue;
+                double[] a; if (!sum.TryGetValue(markerKey[v], out a)) { a = new double[4]; sum[markerKey[v]] = a; }
+                a[0] += pos[v][0]; a[1] += pos[v][1]; a[2] += pos[v][2]; a[3]++;
+            }
+            if (sum.Count == 0) return false;   // nothing flagged moving -> let it stay static
+
+            // assign each moving group to the nearest non-root bone pivot
+            var groupBone = new Dictionary<int, int>();
+            foreach (var kv in sum)
+            {
+                double cx = kv.Value[0] / kv.Value[3], cy = kv.Value[1] / kv.Value[3], cz = kv.Value[2] / kv.Value[3];
+                int best = 1; double bestD = double.MaxValue;
+                for (int j = 1; j < n; j++)
+                {
+                    double dx = pivot[j][0] - cx, dy = pivot[j][1] - cy, dz = pivot[j][2] - cz;
+                    double d = dx * dx + dy * dy + dz * dz;
+                    if (d < bestD) { bestD = d; best = j; }
+                }
+                groupBone[kv.Key] = best;
+            }
+
+            // per-vertex: static -> root joint 0, moving -> its group's bone, full weight
+            for (int v = 0; v < vCount; v++)
+            {
+                int j = 0, b;
+                if (markerKey[v] != ShellNeutralMarker && groupBone.TryGetValue(markerKey[v], out b)) j = b;
+                sd.VJoints[v * 4] = (ushort)j; sd.VJoints[v * 4 + 1] = 0; sd.VJoints[v * 4 + 2] = 0; sd.VJoints[v * 4 + 3] = 0;
+                sd.VWeights[v * 4] = 1f; sd.VWeights[v * 4 + 1] = 0; sd.VWeights[v * 4 + 2] = 0; sd.VWeights[v * 4 + 3] = 0;
+            }
+            return true;
         }
 
         private static void ReadQuadU(IVertexComponentValue c, ushort[] outv, int jointCount)
