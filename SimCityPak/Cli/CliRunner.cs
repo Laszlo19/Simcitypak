@@ -34,6 +34,10 @@ namespace SimCityPak.Cli
         // SimCity 2013 type id for a property list (.prop) resource.
         private const uint PROP_TYPE_ID = 0x00b1b104;
 
+        // SimCity 2013 type id for an "EA VP60 Video File" resource. The raw bytes are
+        // an EA "MVhd" container holding a VP6 stream; ffmpeg's EA demuxer reads them.
+        private const uint VIDEO_TYPE_ID = 0x376840D7;
+
         // "Model Details (PROP)" property: a catalog prop's Key reference to the
         // model/gameplay asset instance it belongs to. Used by --combine.
         private const uint MODEL_DETAILS_HASH = 0x0975695f;
@@ -53,6 +57,7 @@ namespace SimCityPak.Cli
                 case "export-texture":
                 case "export-prop":
                 case "export-audio":
+                case "export-video":
                 case "export-all":
                 case "help":
                 case "--help":
@@ -92,6 +97,8 @@ namespace SimCityPak.Cli
                         return RunExportAll(args);
                     case "export-audio":
                         return RunExportAudio(args);
+                    case "export-video":
+                        return RunExportVideo(args);
                     default:
                         PrintHelp();
                         return 0;
@@ -115,6 +122,7 @@ namespace SimCityPak.Cli
             Console.WriteLine("  SimCityPak.exe export-texture <input> <outputDir>");
             Console.WriteLine("  SimCityPak.exe export-prop    <input> <outputDir>");
             Console.WriteLine("  SimCityPak.exe export-audio   <input> <outputDir>");
+            Console.WriteLine("  SimCityPak.exe export-video   <input> <outputDir> [--mp4]");
             Console.WriteLine();
             Console.WriteLine("  <input> may be:");
             Console.WriteLine("    - a .package file  -> exports every matching resource inside it");
@@ -130,6 +138,8 @@ namespace SimCityPak.Cli
             Console.WriteLine("                   property names resolved; --combine merges an asset's model +");
             Console.WriteLine("                   gameplay + catalog props into one file (package input)");
             Console.WriteLine("  export-audio   : Wwise Vorbis audio -> PCM .wav (via bundled vgmstream)");
+            Console.WriteLine("  export-video   : EA VP60 video -> raw .vp6 (plays in ffmpeg-based players);");
+            Console.WriteLine("                   add --mp4 to re-encode to .mp4 (needs ffmpeg on PATH)");
             Console.WriteLine("  export-all     : every model -> .glb AND every texture -> image, one folder");
             Console.WriteLine();
             Console.WriteLine("  When exporting from a .package, add  --locale <Locale\\xx-xx\\Data.package>");
@@ -1385,6 +1395,154 @@ namespace SimCityPak.Cli
                     (string.IsNullOrWhiteSpace(err) ? "" : " :: " + err.Split('\n')[0].Trim()));
                 return false;
             }
+        }
+
+        // ----- export-video -------------------------------------------------
+
+        /// <summary>Locates an ffmpeg executable: first a bundled copy in Tools\ffmpeg
+        /// next to the exe, otherwise the first ffmpeg.exe on PATH. Returns null if none.</summary>
+        public static string FindFfmpeg()
+        {
+            string local = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Tools", "ffmpeg", "ffmpeg.exe");
+            if (File.Exists(local)) return local;
+            try
+            {
+                string pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
+                foreach (string dir in pathEnv.Split(Path.PathSeparator))
+                {
+                    if (string.IsNullOrWhiteSpace(dir)) continue;
+                    try
+                    {
+                        string cand = Path.Combine(dir.Trim(), "ffmpeg.exe");
+                        if (File.Exists(cand)) return cand;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>Re-encodes an EA VP6 video file to H.264 .mp4 via ffmpeg. Audio is
+        /// dropped (-an): the EA audio sub-stream isn't decodable by ffmpeg's EA demuxer.</summary>
+        public static bool TranscodeVideoToMp4(string ffmpeg, string inputPath, string outPath, out string error)
+        {
+            error = null;
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffmpeg,
+                Arguments = string.Format(
+                    "-y -hide_banner -loglevel error -i \"{0}\" -c:v libx264 -pix_fmt yuv420p -an \"{1}\"",
+                    inputPath, outPath),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            using (Process p = Process.Start(psi))
+            {
+                p.StandardOutput.ReadToEnd();
+                string err = p.StandardError.ReadToEnd();
+                p.WaitForExit();
+                if (p.ExitCode == 0 && File.Exists(outPath) && new FileInfo(outPath).Length > 0)
+                    return true;
+                error = string.IsNullOrWhiteSpace(err) ? ("ffmpeg exit " + p.ExitCode) : err.Trim();
+                return false;
+            }
+        }
+
+        private static int RunExportVideo(string[] args)
+        {
+            if (args.Length < 3)
+            {
+                Console.WriteLine("Usage: SimCityPak.exe export-video <input> <outputDir> [--mp4]");
+                return 2;
+            }
+            string input = args[1];
+            string outDir = args[2];
+            bool toMp4 = args.Any(a => a.Equals("--mp4", StringComparison.OrdinalIgnoreCase));
+            Directory.CreateDirectory(outDir);
+
+            string ffmpeg = null;
+            if (toMp4)
+            {
+                ffmpeg = FindFfmpeg();
+                if (ffmpeg == null)
+                {
+                    Console.WriteLine("ERROR: --mp4 requested but ffmpeg was not found on PATH " +
+                        "(or in Tools\\ffmpeg next to the exe).");
+                    return 2;
+                }
+            }
+
+            int ok = 0, fails = 0;
+
+            if (input.EndsWith(".package", StringComparison.OrdinalIgnoreCase))
+            {
+                DatabasePackedFile package = DatabasePackedFile.LoadFromFile(input);
+                foreach (DatabaseIndex index in package.Indices)
+                {
+                    if (index.TypeId != VIDEO_TYPE_ID) continue;
+                    string baseName = string.Format("{0:x8}-{1:x8}-{2:x8}",
+                        index.TypeId, index.GroupContainer, index.InstanceId);
+                    if (ExportOneVideo(index.GetIndexData(true), baseName, outDir, ffmpeg)) ok++; else fails++;
+                }
+            }
+            else if (Directory.Exists(input))
+            {
+                foreach (string file in Directory.GetFiles(input, "*.vp6"))
+                {
+                    if (ExportOneVideo(File.ReadAllBytes(file),
+                        Path.GetFileNameWithoutExtension(file), outDir, ffmpeg)) ok++; else fails++;
+                }
+            }
+            else if (File.Exists(input))
+            {
+                if (ExportOneVideo(File.ReadAllBytes(input),
+                    Path.GetFileNameWithoutExtension(input), outDir, ffmpeg)) ok++; else fails++;
+            }
+            else
+            {
+                Console.WriteLine("ERROR: input not found: " + input);
+                return 2;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine(string.Format("Done. exported={0} failed={1}", ok, fails));
+            Console.WriteLine("Output: " + Path.GetFullPath(outDir));
+            return fails > 0 ? 1 : 0;
+        }
+
+        /// <summary>Writes one video resource: raw .vp6 always, plus .mp4 when ffmpeg is given.</summary>
+        private static bool ExportOneVideo(byte[] data, string baseName, string outDir, string ffmpeg)
+        {
+            string vp6Path = Path.Combine(outDir, baseName + ".vp6");
+            try
+            {
+                File.WriteAllBytes(vp6Path, data);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("FAIL " + baseName + " :: " + ex.Message);
+                return false;
+            }
+
+            if (ffmpeg == null)
+            {
+                Console.WriteLine("OK   " + baseName + ".vp6");
+                return true;
+            }
+
+            string mp4Path = Path.Combine(outDir, baseName + ".mp4");
+            string error;
+            if (TranscodeVideoToMp4(ffmpeg, vp6Path, mp4Path, out error))
+            {
+                Console.WriteLine("OK   " + baseName + ".vp6 + .mp4");
+                return true;
+            }
+            Console.WriteLine("WARN " + baseName + ".vp6 written, but mp4 transcode failed :: " +
+                error.Split('\n')[0].Trim());
+            return false;
         }
     }
 }

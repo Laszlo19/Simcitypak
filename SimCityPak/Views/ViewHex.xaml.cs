@@ -34,6 +34,48 @@ namespace SimCityPak
             if (DataChangedHandler != null) DataChangedHandler(this, new EventArgs());
         }
 
+        // Building a hex string for the whole resource is O(n) in both time and
+        // (worse) allocations: BitConverter.ToString + SplitIntoChunks produces one
+        // small string per row, so a 90 MB resource (e.g. an EA VP60 video) yields
+        // millions of objects and a multi-hundred-MB string -> OutOfMemoryException
+        // and a cascade of error dialogs. Cap what we render; the full bytes are
+        // still available via Save/Export.
+        private const int MaxRenderBytes = 256 * 1024;
+
+        /// <summary>True when the displayed text is only the first MaxRenderBytes of a
+        /// larger resource (so editing/saving it back would corrupt the resource).</summary>
+        private bool _truncated;
+
+        private void Render(byte[] data)
+        {
+            if (data == null) { textBoxHex.Text = ""; textBoxRawData.Text = ""; _truncated = false; return; }
+
+            _truncated = data.Length > MaxRenderBytes;
+            byte[] shown = data;
+            if (_truncated)
+            {
+                shown = new byte[MaxRenderBytes];
+                Array.Copy(data, shown, MaxRenderBytes);
+            }
+
+            ByteArrayToIndexedHexStringConverter converter = new ByteArrayToIndexedHexStringConverter();
+            string hex = (string)converter.Convert(shown, typeof(string), "8", CultureInfo.CurrentCulture);
+            string ascii = System.Text.ASCIIEncoding.ASCII.GetString(shown);
+
+            if (_truncated)
+            {
+                string note = string.Format(
+                    "[ Showing the first {0:N0} of {1:N0} bytes. This resource is too large to display in" +
+                    " full; use Save/Export to get the complete data. ]{2}{2}",
+                    MaxRenderBytes, data.Length, Environment.NewLine);
+                hex = note + hex;
+                ascii = note + ascii;
+            }
+
+            textBoxHex.Text = hex;
+            textBoxRawData.Text = ascii;
+        }
+
         private void Grid_DataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
         {
             if (this.DataContext != null)
@@ -41,16 +83,11 @@ namespace SimCityPak
                 if (this.DataContext.GetType() == typeof(DatabaseIndexData))
                 {
                     DatabaseIndexData index = (DatabaseIndexData)this.DataContext;
-                    ByteArrayToIndexedHexStringConverter converter = new ByteArrayToIndexedHexStringConverter();
-                    textBoxHex.Text = (string)converter.Convert(index.Data, typeof(string), "8", CultureInfo.CurrentCulture);
-                    textBoxRawData.Text = System.Text.ASCIIEncoding.ASCII.GetString(index.Data);
+                    Render(index.Data);
                 }
                 else if (this.DataContext.GetType() == typeof(byte[]))
                 {
-                    byte[] data = (byte[])this.DataContext;
-                    ByteArrayToIndexedHexStringConverter converter = new ByteArrayToIndexedHexStringConverter();
-                    textBoxHex.Text = (string)converter.Convert(data, typeof(string), "8", CultureInfo.CurrentCulture);
-                    textBoxRawData.Text = System.Text.ASCIIEncoding.ASCII.GetString(data);
+                    Render((byte[])this.DataContext);
                 }
                 else if (this.DataContext.GetType() == typeof(RW4Section))
                 {
@@ -65,6 +102,14 @@ namespace SimCityPak
 
         private void btnSave_Click(object sender, RoutedEventArgs e)
         {
+            if (_truncated)
+            {
+                MessageBox.Show(
+                    "This resource is too large to display in full, so only the first part is shown. " +
+                    "Saving would overwrite the resource with the truncated text. Use Export instead.",
+                    "Cannot save a truncated view", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
             if (this.DataContext != null)
             {
                 if (this.DataContext.GetType() == typeof(DatabaseIndexData))

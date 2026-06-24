@@ -36,6 +36,9 @@
                 <DataTemplate DataType="{x:Type simCityPak:DatabaseIndexData}" x:Key="viewRaster">
                     <simCityPak:ViewRaster />
                 </DataTemplate>
+                <DataTemplate DataType="{x:Type simCityPak:DatabaseIndexData}" x:Key="viewVideo">
+                    <simCityPak:ViewVideo />
+                </DataTemplate>
             </ContentControl.Resources>
         </ContentControl>
     </Grid>
