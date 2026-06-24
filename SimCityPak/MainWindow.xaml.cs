@@ -83,13 +83,7 @@ namespace SimCityPak
             }
 
             string folder;
-            using (FolderBrowserDialog dlg = new FolderBrowserDialog())
-            {
-                dlg.Description = "Choose a folder to export all models (.glb) and textures (.dds) into";
-                dlg.ShowNewFolderButton = true;
-                if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
-                folder = dlg.SelectedPath;
-            }
+            if (!ModernFolderDialog.TryPick("Choose a folder to export all models (.glb) and textures (.dds) into", out folder)) return;
 
             Logger.Info("GUI: export all -> " + folder);
             var indices = DatabaseManager.Instance.Indices.ToList();   // snapshot for the worker thread
@@ -133,13 +127,7 @@ namespace SimCityPak
             bool json = fmt == MessageBoxResult.Yes;
 
             string folder;
-            using (FolderBrowserDialog dlg = new FolderBrowserDialog())
-            {
-                dlg.Description = "Choose a folder to export combined property files into";
-                dlg.ShowNewFolderButton = true;
-                if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
-                folder = dlg.SelectedPath;
-            }
+            if (!ModernFolderDialog.TryPick("Choose a folder to export combined property files into", out folder)) return;
 
             Logger.Info("GUI: export combined props -> " + folder + (json ? " (json)" : " (txt)"));
             var indices = DatabaseManager.Instance.Indices.ToList();   // snapshot for the worker thread
@@ -357,30 +345,22 @@ namespace SimCityPak
         {
             if (dataGridInstances.SelectedItems.Count > 1)
             {
-                using (FolderBrowserDialog browserDialog = new FolderBrowserDialog())
+                string path;
+                if (!ModernFolderDialog.TryPick("Choose Export Folder", out path)) return;
+                if (!Directory.Exists(path)) return;
+                foreach (var selectedItem in dataGridInstances.SelectedItems)
                 {
-                    browserDialog.Description = "Choose Export Folder";
-                    browserDialog.ShowNewFolderButton = true;
-                    DialogResult result = browserDialog.ShowDialog();
-                    string path = browserDialog.SelectedPath;
-                    if (!Directory.Exists(path))
-                    {
-                        return;
-                    }
-                    foreach (var selectedItem in dataGridInstances.SelectedItems)
-                    {
-                        DatabaseIndex element = selectedItem as DatabaseIndex;
-                        if (element == null)
-                            continue;
+                    DatabaseIndex element = selectedItem as DatabaseIndex;
+                    if (element == null)
+                        continue;
 
-                        try
-                        {
-                            DatabasePackedFile.WriteToPath(element, Path.Combine(path, element.GetExportFileName()));
-                        }
-                        catch
-                        {
-                            System.Windows.Forms.MessageBox.Show("File is readonly", "Error");
-                        }
+                    try
+                    {
+                        DatabasePackedFile.WriteToPath(element, Path.Combine(path, element.GetExportFileName()));
+                    }
+                    catch
+                    {
+                        System.Windows.Forms.MessageBox.Show("File is readonly", "Error");
                     }
                 }
             }

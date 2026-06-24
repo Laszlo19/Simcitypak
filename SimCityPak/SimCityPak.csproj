@@ -140,6 +140,7 @@
       <SubType>Designer</SubType>
     </ApplicationDefinition>
     <Compile Include="AppClipboard.cs" />
+    <Compile Include="Dialogs\ModernFolderDialog.cs" />
     <Compile Include="EffectsDirectory\EffectsDirectory.cs" />
     <Compile Include="GraphicsHelpers\QuantizedSignedDistanceFieldGenerator.cs" />
     <Compile Include="GraphicsHelpers\SignedDistanceFieldGenerator.cs" />
