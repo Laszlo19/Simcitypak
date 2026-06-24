@@ -373,6 +373,9 @@ and hits a WPF `_wpftmp` ProjectReference quirk. Output: `SimCityPak\bin\Release
     showing codec/resolution/size + "Save raw video (.vp6)…" and "Export as MP4 (ffmpeg)…" buttons
     (mp4 disabled when ffmpeg is absent; transcode runs on a background Task with a wait cursor).
     `ViewSelector` routes `0x376840D7` to `viewVideo` BEFORE the hex fallback — see the OOM fix below.
+    A **right-click context-menu** item "Export to MP4..." (`mnuExportMp4_Click` in MainWindow) also
+    transcodes a selected video directly; `ContextMenu_Opened` shows it only for video resources
+    (items tagged `Tag="video"`), and it warns if ffmpeg is missing.
     There are only 3 video resources in the base game (2 in `SimCity_App`, 1 in `Data.package`).
     **OOM crash fixed (the reported bug):** selecting a video used to fall through to the hex view
     (`viewData`/`ViewHex`), whose `ByteArrayToIndexedHexStringConverter` builds one small string per
