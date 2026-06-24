@@ -163,6 +163,12 @@ namespace SporeMaster.RenderWare4
         public byte[] VertexFormatData { get; set; }
         public byte[] AdditionalData { get; set; }
 
+        // When the material uses a layout this parser doesn't understand (e.g. no 0x2D shader-def
+        // marker, or an undecoded VertexFormat), we keep the whole section verbatim here instead of
+        // throwing. That lets the rest of the model (mesh, skeleton, animation) still load and export;
+        // texture resolution just finds no references for this model and falls back to no textures.
+        private byte[] _rawSection;
+
         public override void Read(RW4Model m, RW4Section s, Stream r)
         {
             Materials = new List<MaterialTextureReference>();
@@ -171,50 +177,68 @@ namespace SporeMaster.RenderWare4
 
             Size = r.ReadU32();
 
-            Header = r.ReadBytes(28); //read the header
-            //find the vertex format
-            RW4Section vertexFormatSection = m.Sections.Find(sec => sec.TypeCode == SectionTypeCodes.VertexFormat);
-            if (vertexFormatSection != null)
+            try
             {
-                int vertexFormatSize = vertexFormatSection.obj.ComputeSize();
-                VertexFormatData = r.ReadBytes(vertexFormatSize);
-            }
+                Header = r.ReadBytes(28); //read the header
+                //find the vertex format
+                RW4Section vertexFormatSection = m.Sections.Find(sec => sec.TypeCode == SectionTypeCodes.VertexFormat);
+                if (vertexFormatSection != null)
+                {
+                    int vertexFormatSize = vertexFormatSection.obj.ComputeSize();
+                    VertexFormatData = r.ReadBytes(vertexFormatSize);
+                }
 
-            long currentPos = r.Position;
-            // Scan for the 0x2D marker, but never past the section end — otherwise a malformed
-            // material (or a misjudged VertexFormat size) makes this read past EOF forever
-            // (MemoryStream returns 0 without advancing), hanging the whole export.
-            long sectionEnd = s.Pos + s.Size;
-            uint u2D = 0;
-            bool found = false;
-            while (r.Position + 4 <= sectionEnd)
+                long currentPos = r.Position;
+                // Scan for the 0x2D marker, but never past the section end — otherwise a malformed
+                // material (or a misjudged VertexFormat size) makes this read past EOF forever
+                // (MemoryStream returns 0 without advancing), hanging the whole export.
+                long sectionEnd = s.Pos + s.Size;
+                uint u2D = 0;
+                bool found = false;
+                while (r.Position + 4 <= sectionEnd)
+                {
+                    u2D = r.ReadU32();
+                    if (u2D == 0x2D) { found = true; break; }
+                }
+                if (!found) throw new ModelFormatException(r, "RW4Material: 0x2D marker not found in section", s.type_code);
+                int additionalDataSize = (int)r.Position - (int)currentPos - 4;
+                r.Seek(currentPos, SeekOrigin.Begin);
+
+                AdditionalData = r.ReadBytes(additionalDataSize);
+
+                for (int i = 0; i < 6; i++)
+                {
+                    MaterialTextureReference mat = new MaterialTextureReference();
+                    mat.Unknown1 = r.ReadU32();
+                    mat.Unknown2 = r.ReadU32();
+                    mat.TextureInstanceId = r.ReadU32();
+                    mat.Unknown3 = r.ReadU32();
+                    mat.Unknown4 = r.ReadU32();
+                    mat.Unknown5 = r.ReadU32();
+                    Materials.Add(mat);
+                }
+
+                Data = r.ReadBytes((int)Size - (int)(r.Position - pos));
+            }
+            catch (Exception)
             {
-                u2D = r.ReadU32();
-                if (u2D == 0x2D) { found = true; break; }
+                // Alternate/undecoded material layout: preserve the section verbatim and carry on.
+                // (Size == the section size, so this reads exactly to the section end, satisfying
+                // the loader's size check; ComputeSize still returns Size.)
+                r.Seek(pos, SeekOrigin.Begin);
+                _rawSection = r.ReadBytes((int)Size);
+                Materials.Clear();
+                Header = null; VertexFormatData = null; AdditionalData = null; Data = null;
             }
-            if (!found) throw new ModelFormatException(r, "RW4Material: 0x2D marker not found in section", s.type_code);
-            int additionalDataSize = (int)r.Position - (int)currentPos - 4;
-            r.Seek(currentPos, SeekOrigin.Begin);
-
-            AdditionalData = r.ReadBytes(additionalDataSize);
-
-            for (int i = 0; i < 6; i++)
-            {
-                MaterialTextureReference mat = new MaterialTextureReference();
-                mat.Unknown1 = r.ReadU32();
-                mat.Unknown2 = r.ReadU32();
-                mat.TextureInstanceId = r.ReadU32();
-                mat.Unknown3 = r.ReadU32();
-                mat.Unknown4 = r.ReadU32();
-                mat.Unknown5 = r.ReadU32();
-                Materials.Add(mat);
-            }
-
-            Data = r.ReadBytes((int)Size - (int)(r.Position - pos));
         }
 
         public override void Write(RW4Model m, RW4Section s, Stream w)
         {
+            if (_rawSection != null)   // round-trip the verbatim section we couldn't decode
+            {
+                w.Write(_rawSection, 0, _rawSection.Length);
+                return;
+            }
             w.WriteU32(Size);
             if (Header != null)
             {
