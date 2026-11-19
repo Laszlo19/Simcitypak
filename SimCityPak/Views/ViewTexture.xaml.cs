@@ -160,6 +160,7 @@ namespace SimCityPak
                     OpenFileDialog dlg = new OpenFileDialog();
                     dlg.Filter = "DirectDraw Surface .DDS|*.dds";
                     if (dlg.ShowDialog().GetValueOrDefault(false))
+                    using (MainWindow.Busy("Importing DDS…"))
                     {
                         uint textureBlobNumber = textureSection.texData.section.Number;
 
@@ -211,6 +212,7 @@ namespace SimCityPak
                     OpenFileDialog dlg = new OpenFileDialog();
                     dlg.Filter = "BMP|*.bmp";
                     if (dlg.ShowDialog().GetValueOrDefault(false))
+                    using (MainWindow.Busy("Importing BMP…"))
                     {
                         uint textureBlobNumber = textureSection.texData.section.Number;
                         {
@@ -268,6 +270,7 @@ namespace SimCityPak
                     dlg.Filter = "DirectDraw Surface .DDS|*.dds";
                     dlg.FileName = MainWindow.SelectedExportName;   // localized name of the selected resource
                     if (dlg.ShowDialog().GetValueOrDefault(false))
+                    using (MainWindow.Busy("Exporting DDS…"))
                     {
                         using (Stream stream = File.Create(dlg.FileName))
                         {
@@ -324,6 +327,7 @@ namespace SimCityPak
                     dlg.Filter = "BMP|*.bmp";
                     dlg.FileName = MainWindow.SelectedExportName;   // localized name of the selected resource
                     if (dlg.ShowDialog().GetValueOrDefault(false))
+                    using (MainWindow.Busy("Exporting BMP…"))
                     {
                         {
                             WriteableBitmap newBitmap = new WriteableBitmap(textureSection.width, textureSection.height, 96, 96, PixelFormats.Pbgra32, null);
@@ -379,6 +383,7 @@ namespace SimCityPak
 
             //needs to be an 8.8.8.8 ARGB texture
             if (dlg.ShowDialog().GetValueOrDefault(false))
+            using (MainWindow.Busy("Importing DDS…"))
             {
                 uint textureBlobNumber = textureSection.texData.section.Number;
 
@@ -420,6 +425,7 @@ namespace SimCityPak
                     dlg.Filter = "DirectDraw Surface .DDS|*.dds";
                     dlg.FileName = MainWindow.SelectedExportName;   // localized name of the selected resource
                     if (dlg.ShowDialog().GetValueOrDefault(false))
+                    using (MainWindow.Busy("Exporting DDS…"))
                     {
                         using (Stream stream = File.Create(dlg.FileName))
                         {

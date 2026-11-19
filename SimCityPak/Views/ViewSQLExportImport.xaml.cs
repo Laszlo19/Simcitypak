@@ -74,6 +74,7 @@ namespace SimCityPak.Views
             try
             {
                 if (fileDialog.ShowDialog().GetValueOrDefault(false))
+                using (SimCityPak.MainWindow.Busy("Importing SQL…"))
                 {
                     foreach (string fileName in fileDialog.FileNames)
                     {
@@ -125,6 +126,7 @@ namespace SimCityPak.Views
 
             // and dumps the DB
             if (File.Exists(cmbDatabases.SelectedItem.ToString()))
+            using (SimCityPak.MainWindow.Busy("Exporting SQL…"))
             {
                 List<string> result = new List<string>();
                 result.Add("-- SimCityPak SQL Export");

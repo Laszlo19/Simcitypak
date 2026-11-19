@@ -128,6 +128,7 @@ namespace SimCityPak
             dlg.DefaultExt = "bmp";
             dlg.Filter = "BMP|*.bmp";
             if (dlg.ShowDialog().GetValueOrDefault(false))
+            using (SimCityPak.MainWindow.Busy("Exporting BMP…"))
             {
                 using (FileStream filestream = new FileStream(dlg.FileName, FileMode.Create))
                 {
@@ -144,6 +145,7 @@ namespace SimCityPak
             dlg.DefaultExt = "bmp";
             dlg.Filter = "BMP|*.bmp";
             if (dlg.ShowDialog().GetValueOrDefault(false))
+            using (SimCityPak.MainWindow.Busy("Importing BMP…"))
             {
                 DatabaseIndexData index = (DatabaseIndexData)this.DataContext;
 

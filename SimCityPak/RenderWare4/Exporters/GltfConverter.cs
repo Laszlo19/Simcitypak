@@ -39,8 +39,16 @@ namespace SporeMaster.RenderWare4
         /// </summary>
         private readonly Func<RW4Mesh, MaterialTextures> _textureProvider;
 
+        /// <summary>Optional callback returning a per-vertex RGBA colour buffer (length vCount*4,
+        /// byte R,G,B,A per vertex) or null. Written as glTF COLOR_0 (normalized ubyte VEC4), which
+        /// tints the base colour even with no material — used to carry the SimCity facade's
+        /// per-vertex palette albedo onto meshes that have no usable UV/texture.</summary>
+        private readonly Func<RW4Mesh, byte[]> _vertexColorProvider;
+
         public GltfConverter() { }
         public GltfConverter(Func<RW4Mesh, MaterialTextures> textureProvider) { _textureProvider = textureProvider; }
+        public GltfConverter(Func<RW4Mesh, MaterialTextures> textureProvider, Func<RW4Mesh, byte[]> vertexColorProvider)
+        { _textureProvider = textureProvider; _vertexColorProvider = vertexColorProvider; }
 
         /// <summary>One animation channel: a joint's time-stamped local TRS keyframes.</summary>
         private class AnimTrack
@@ -303,6 +311,15 @@ namespace SporeMaster.RenderWare4
                 specPng = tex != null ? tex.Specular : null;
             }
 
+            // Per-vertex palette albedo (COLOR_0). Runs even without a usable UV, so facade
+            // buildings (whose only texcoord is the FLOAT4 tiling coord) still get their colour.
+            byte[] vertColors = null;
+            if (_vertexColorProvider != null)
+            {
+                try { vertColors = _vertexColorProvider(mesh); } catch { vertColors = null; }
+                if (vertColors != null && vertColors.Length != vCount * 4) vertColors = null;
+            }
+
             using (var bin = new MemoryStream())
             using (var bw = new BinaryWriter(bin))
             {
@@ -330,6 +347,14 @@ namespace SporeMaster.RenderWare4
                     else { bw.Write(0f); bw.Write(0f); }
                 }
                 int uvLen = vCount * 8;
+
+                int colorOffset = -1;
+                if (vertColors != null)
+                {
+                    Pad4(bw, bin);
+                    colorOffset = (int)bin.Position;
+                    bw.Write(vertColors, 0, vCount * 4);   // R,G,B,A bytes per vertex (normalized)
+                }
 
                 int idxOffset = (int)bin.Position;
                 int idxCount = 0;
@@ -394,7 +419,7 @@ namespace SporeMaster.RenderWare4
                 byte[] binData = bin.ToArray();
 
                 string json = BuildJson(vCount, idxCount, posOffset, posLen, normOffset, normLen,
-                    uvOffset, uvLen, idxOffset, idxLen, imgSpans, baseImg, normalImg, specImg,
+                    uvOffset, uvLen, colorOffset, idxOffset, idxLen, imgSpans, baseImg, normalImg, specImg,
                     binData.Length, min, max, skin, jointsOffset, weightsOffset, ibmOffset);
 
                 WriteGlb(fileName, json, binData);
@@ -408,16 +433,18 @@ namespace SporeMaster.RenderWare4
         }
 
         private const int COMP_USHORT = 5123;
+        private const int COMP_UBYTE = 5121;
 
         private static string BuildJson(int vCount, int idxCount,
             int posOffset, int posLen, int normOffset, int normLen,
-            int uvOffset, int uvLen, int idxOffset, int idxLen,
+            int uvOffset, int uvLen, int colorOffset, int idxOffset, int idxLen,
             List<int[]> imgSpans, int baseImg, int normalImg, int specImg,
             int bufferLength, float[] min, float[] max,
             SkinData skin, int jointsOffset, int weightsOffset, int ibmOffset)
         {
             int nImages = imgSpans.Count;
-            bool hasMaterial = nImages > 0;
+            bool hasTextures = nImages > 0;
+            bool hasMaterial = hasTextures || colorOffset >= 0;   // also emit a material for COLOR_0-only meshes
             bool hasSkin = skin != null;
 
             var bufferViews = new List<object>
@@ -437,6 +464,16 @@ namespace SporeMaster.RenderWare4
             };
 
             var primitiveAttrs = new Dictionary<string, object> { ["POSITION"] = 0, ["NORMAL"] = 1, ["TEXCOORD_0"] = 2 };
+
+            // per-vertex colour (COLOR_0): normalized ubyte VEC4, multiplies the base colour
+            if (colorOffset >= 0)
+            {
+                int bvC = bufferViews.Count;
+                bufferViews.Add(new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = colorOffset, ["byteLength"] = vCount * 4, ["target"] = TARGET_ARRAY });
+                int accC = accessors.Count;
+                accessors.Add(new Dictionary<string, object> { ["bufferView"] = bvC, ["componentType"] = COMP_UBYTE, ["count"] = vCount, ["type"] = "VEC4", ["normalized"] = true });
+                primitiveAttrs["COLOR_0"] = accC;
+            }
 
             // skin accessors/bufferViews (JOINTS_0, WEIGHTS_0, inverse-bind matrices)
             int jointsAcc = -1, weightsAcc = -1, ibmAcc = -1;
@@ -567,14 +604,17 @@ namespace SporeMaster.RenderWare4
 
             if (hasMaterial)
             {
-                gltf["images"] = images.ToArray();
-                gltf["samplers"] = new object[] { new Dictionary<string, object>() };
-                gltf["textures"] = textures.ToArray();
+                if (hasTextures)
+                {
+                    gltf["images"] = images.ToArray();
+                    gltf["samplers"] = new object[] { new Dictionary<string, object>() };
+                    gltf["textures"] = textures.ToArray();
+                }
 
                 var pbr = new Dictionary<string, object>
                 {
                     ["metallicFactor"] = 0.0,
-                    ["roughnessFactor"] = 1.0
+                    ["roughnessFactor"] = 0.9
                 };
                 if (baseImg >= 0) pbr["baseColorTexture"] = new Dictionary<string, object> { ["index"] = baseImg };
 

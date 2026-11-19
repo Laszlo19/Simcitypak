@@ -286,6 +286,7 @@ namespace SimCityPak
             dlg.Filter = "WaveFront .OBJ|*.obj";
             dlg.FileName = MainWindow.SelectedExportName;   // localized name of the selected resource
             if (dlg.ShowDialog().GetValueOrDefault(false))
+            using (MainWindow.Busy("Exporting OBJ…"))
             {
                 if (this.DataContext != null && this.DataContext.GetType() == typeof(RW4ModelSectionView))
                 {
@@ -307,6 +308,7 @@ namespace SimCityPak
             dlg.DefaultExt = ".dae";
             dlg.Filter = "COLLADA|*.dae";
             if (dlg.ShowDialog().GetValueOrDefault(false))
+            using (MainWindow.Busy("Importing COLLADA…"))
             {
                 RW4ModelSectionView sectionView = this.DataContext as RW4ModelSectionView;
                 VertexFormat vertexFormatSection = (VertexFormat)sectionView.Model.Sections.First(s => s.TypeCode == SectionTypeCodes.VertexFormat).obj;
@@ -333,6 +335,7 @@ namespace SimCityPak
             dlg.DefaultExt = ".obj";
             dlg.Filter = "Wavefront .OBJ|*.obj";
             if (dlg.ShowDialog().GetValueOrDefault(false))
+            using (MainWindow.Busy("Importing OBJ…"))
             {
                 RW4ModelSectionView sectionView = this.DataContext as RW4ModelSectionView;
                 VertexFormat vertexFormatSection = (VertexFormat)sectionView.Model.Sections.First(s => s.TypeCode == SectionTypeCodes.VertexFormat).obj;

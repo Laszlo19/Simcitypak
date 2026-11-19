@@ -137,10 +137,8 @@ namespace SimCityPak
 
         private void buttonExport_Click(object sender, RoutedEventArgs e)
         {
-
-            SaveRW4Model();
-
-
+            using (SimCityPak.MainWindow.Busy("Saving RW4 model…"))
+                SaveRW4Model();
         }
 
         private void SaveRW4Model()

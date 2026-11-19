@@ -38,6 +38,25 @@ namespace SimCityPak.Cli
         // model/gameplay asset instance it belongs to. Used by --combine.
         private const uint MODEL_DETAILS_HASH = 0x0975695f;
 
+        // SimCity 2013 type id for a shader-source / ArgScript fragment container.
+        // These live in SimCity_App.package (32 of them, ~37 MB) and hold the
+        // GlassBox HLSL shader source (building4 / genericLot / decal families):
+        // [fragment name][binary metadata][HLSL text][uniform declarations].
+        private const uint SHADER_CONTAINER_TYPE_ID = 0x0469a3f7;
+
+        // Which facade palette ROW (buildingVariation) to bake when reproducing the
+        // building4 facade color. In-game this is per-building-placement instance data
+        // (the engine picks it from wealth/variation); a single-model export has to pick
+        // one of the ~8 rows. Overridable with --variation N on export-gltf / export-all.
+        private static int _facadeVariation = 0;
+
+        // EXPERIMENTAL and off by default: the building4 palette-colour bake. It is not yet
+        // faithful (the shader selects colour per-vertex via palU and blends two UV layers; a
+        // single per-mask-texel bake with an averaged palU, plus the mask.b brightness term,
+        // collapses the dominant mask regions to black). Until it reproduces correctly, exports
+        // keep the greyscale facade. Enable the experiment with --facade-color.
+        private static bool _facadeColorExperimental = false;
+
         [DllImport("kernel32.dll")]
         private static extern bool AttachConsole(int dwProcessId);
         private const int ATTACH_PARENT_PROCESS = -1;
@@ -54,6 +73,10 @@ namespace SimCityPak.Cli
                 case "export-prop":
                 case "export-audio":
                 case "export-all":
+                case "export-shaders":
+                case "inspect-materials":
+                case "bake-facade":
+                case "describe-resource":
                 case "help":
                 case "--help":
                 case "-h":
@@ -72,6 +95,8 @@ namespace SimCityPak.Cli
             AttachConsole(ATTACH_PARENT_PROCESS);
             Console.WriteLine();
             Logger.Info("CLI: " + string.Join(" ", args));
+            _facadeVariation = GetIntArg(args, "--variation", 0);
+            _facadeColorExperimental = args != null && args.Any(a => a.Equals("--facade-color", StringComparison.OrdinalIgnoreCase));
 
             try
             {
@@ -82,7 +107,7 @@ namespace SimCityPak.Cli
                     case "export-gltf":
                     {
                         var texLookup = BuildTextureLookupForInput(args.Length > 1 ? args[1] : "", args);
-                        return RunExportModels(args, ".glb", (m, p) => new GltfConverter(mesh => ResolveTextures(mesh, texLookup)).Export(m, p));
+                        return RunExportModels(args, ".glb", (m, p) => new GltfConverter(mesh => ResolveTextures(mesh, texLookup), mesh => ResolvePerVertexColor(mesh, texLookup)).Export(m, p));
                     }
                     case "export-texture":
                         return RunExportTextures(args);
@@ -92,6 +117,14 @@ namespace SimCityPak.Cli
                         return RunExportAll(args);
                     case "export-audio":
                         return RunExportAudio(args);
+                    case "export-shaders":
+                        return RunExportShaders(args);
+                    case "inspect-materials":
+                        return RunInspectMaterials(args);
+                    case "bake-facade":
+                        return RunBakeFacade(args);
+                    case "describe-resource":
+                        return RunDescribeResource(args);
                     default:
                         PrintHelp();
                         return 0;
@@ -115,6 +148,7 @@ namespace SimCityPak.Cli
             Console.WriteLine("  SimCityPak.exe export-texture <input> <outputDir>");
             Console.WriteLine("  SimCityPak.exe export-prop    <input> <outputDir>");
             Console.WriteLine("  SimCityPak.exe export-audio   <input> <outputDir>");
+            Console.WriteLine("  SimCityPak.exe export-shaders <input.package> <outputDir> [--filter <substr>]");
             Console.WriteLine();
             Console.WriteLine("  <input> may be:");
             Console.WriteLine("    - a .package file  -> exports every matching resource inside it");
@@ -131,6 +165,8 @@ namespace SimCityPak.Cli
             Console.WriteLine("                   gameplay + catalog props into one file (package input)");
             Console.WriteLine("  export-audio   : Wwise Vorbis audio -> PCM .wav (via bundled vgmstream)");
             Console.WriteLine("  export-all     : every model -> .glb AND every texture -> image, one folder");
+            Console.WriteLine("  export-shaders : shader-source containers (type 0x0469a3f7) -> .bin + .txt");
+            Console.WriteLine("                   (HLSL source); --filter <substr> keeps only matching ones");
             Console.WriteLine();
             Console.WriteLine("  When exporting from a .package, add  --locale <Locale\\xx-xx\\Data.package>");
             Console.WriteLine("  (or set it in the GUI Settings) to name files by their localized asset");
@@ -218,6 +254,297 @@ namespace SimCityPak.Cli
             return fails > 0 ? 1 : 0;
         }
 
+        /// <summary>
+        /// Dumps shader-source containers (type 0x0469a3f7) from a .package. Writes each
+        /// matching resource's raw decompressed bytes (.bin) and its extracted printable
+        /// text (.txt), which holds the fragment names + HLSL source. Optional
+        /// <c>--filter &lt;substr&gt;</c> keeps only containers whose text contains that
+        /// substring (case-insensitive), e.g. <c>--filter building4</c>.
+        /// </summary>
+        private static int RunExportShaders(string[] args)
+        {
+            if (args.Length < 3)
+            {
+                Console.WriteLine("Usage: SimCityPak.exe export-shaders <input.package> <outputDir> [--filter <substr>]");
+                return 2;
+            }
+            string input = args[1];
+            string outDir = args[2];
+            string filter = null;
+            for (int i = 3; i < args.Length - 1; i++)
+                if (args[i].Equals("--filter", StringComparison.OrdinalIgnoreCase)) filter = args[i + 1];
+
+            if (!input.EndsWith(".package", StringComparison.OrdinalIgnoreCase) || !File.Exists(input))
+            {
+                Console.WriteLine("ERROR: export-shaders needs a .package input: " + input);
+                return 2;
+            }
+            Directory.CreateDirectory(outDir);
+
+            DatabasePackedFile package = DatabasePackedFile.LoadFromFile(input);
+            int scanned = 0, written = 0; long totalBytes = 0;
+            foreach (DatabaseIndex index in package.Indices)
+            {
+                if (index.TypeId != SHADER_CONTAINER_TYPE_ID) continue;
+                scanned++;
+                byte[] data;
+                try { data = index.GetIndexData(true); }
+                catch (Exception ex) { Console.WriteLine("FAIL decompress " + index.InstanceId.ToString("x8") + " :: " + ex.Message); continue; }
+
+                string text = ExtractAsciiStrings(data, 4);
+                if (filter != null && text.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+                string baseName = string.Format("{0:x8}-{1:x8}", index.GroupContainer, index.InstanceId);
+                File.WriteAllBytes(Path.Combine(outDir, baseName + ".bin"), data);
+                File.WriteAllText(Path.Combine(outDir, baseName + ".txt"), text);
+                written++; totalBytes += data.Length;
+                Console.WriteLine(string.Format("  {0}  ({1:n0} bytes)", baseName, data.Length));
+            }
+
+            Console.WriteLine();
+            Console.WriteLine(string.Format("Done. shader containers: scanned={0} written={1} ({2:n0} bytes){3}",
+                scanned, written, totalBytes, filter != null ? "  filter='" + filter + "'" : ""));
+            Console.WriteLine("Output: " + Path.GetFullPath(outDir));
+            return 0;
+        }
+
+        /// <summary>
+        /// Pulls runs of printable ASCII (incl. tab/newline, so HLSL formatting survives)
+        /// at least <paramref name="minLen"/> chars long out of a binary blob, separating
+        /// runs with a marker line. Used to read shader source out of a container.
+        /// </summary>
+        private static string ExtractAsciiStrings(byte[] data, int minLen)
+        {
+            var sb = new StringBuilder();
+            var run = new StringBuilder();
+            Action flush = null;
+            flush = () =>
+            {
+                if (run.Length >= minLen) { sb.Append(run); sb.Append("\n────────\n"); }
+                run.Clear();
+            };
+            foreach (byte b in data)
+            {
+                if (b == 0x09 || b == 0x0a || b == 0x0d || (b >= 0x20 && b <= 0x7e)) run.Append((char)b);
+                else flush();
+            }
+            flush();
+            return sb.ToString();
+        }
+
+        /// <summary>Diagnostic: for each RW4 model with a textureType-116 texture (the facade
+        /// palette/materialData format), prints its material texture slots — slot byte Unknown1,
+        /// referenced instance id, and the resolved texture's type + dimensions. Pins down which
+        /// slot is the real BuildingPaletteSample palette (expect ~256x8) vs the per-model
+        /// materialData strip (~69x4). Add --all to list every model, --limit N to cap output.</summary>
+        private static int RunInspectMaterials(string[] args)
+        {
+            if (args.Length < 2) { Console.WriteLine("Usage: SimCityPak.exe inspect-materials <input.package> [--limit N] [--all]"); return 2; }
+            string input = args[1];
+            int limit = GetIntArg(args, "--limit", 12);
+            bool all = args.Any(a => a.Equals("--all", StringComparison.OrdinalIgnoreCase));
+            if (!input.EndsWith(".package", StringComparison.OrdinalIgnoreCase) || !File.Exists(input))
+            { Console.WriteLine("ERROR: inspect-materials needs a .package: " + input); return 2; }
+
+            var lookup = BuildTextureLookupForInput(input, args);
+            DatabasePackedFile package = DatabasePackedFile.LoadFromFile(input);
+            Console.WriteLine("slots: u1=<slotByte>:<instanceId>:<kind/type/WxH>   (tt74=f32-RGBA=116)");
+            int shown = 0;
+            foreach (DatabaseIndex index in package.Indices)
+            {
+                if (index.TypeId != RW4_MODEL_TYPE_ID) continue;
+                RW4Model model;
+                try { model = new RW4Model(); using (var ms = new MemoryStream(index.GetIndexData(true))) model.Read(ms); }
+                catch { continue; }
+                var refs = new List<MaterialTextureReference>();
+                foreach (RW4Section s in model.Sections)
+                {
+                    RW4Material mat = s.obj as RW4Material;
+                    if (mat != null && mat.Materials != null) refs.AddRange(mat.Materials);
+                }
+                if (refs.Count == 0) continue;
+                var descs = new List<string>();
+                bool has116 = false;
+                foreach (var mr in refs)
+                {
+                    if (mr.TextureInstanceId == 0) { descs.Add("u1=" + mr.Unknown1 + ":--"); continue; }
+                    string d; DatabaseIndex tdi;
+                    if (lookup != null && lookup.TryGetValue(mr.TextureInstanceId, out tdi)) d = DescribeTexture(tdi, ref has116);
+                    else d = "unresolved";
+                    descs.Add("u1=" + mr.Unknown1 + ":" + mr.TextureInstanceId.ToString("x8") + ":" + d);
+                }
+                if (!all && !has116) continue;
+                Console.WriteLine(index.InstanceId.ToString("x8") + "  " + string.Join("  ", descs));
+                if (++shown >= limit) break;
+            }
+            Console.WriteLine();
+            Console.WriteLine("shown=" + shown + (all ? " (all models)" : " (only models with a texType-116 texture)"));
+            return 0;
+        }
+
+        /// <summary>Diagnostic: bake one building's facade albedo (the building4 palette composite)
+        /// to a PNG so it can be eyeballed, independent of the glTF facade-UV gating. Resolves the
+        /// model's palette (slot u1=0, texType 116) and region mask (slot u1=1), runs
+        /// CompositeFacadePalette with the mesh's representative palU and the chosen --variation,
+        /// and writes &lt;inst&gt;_baked_vN.png plus &lt;inst&gt;_mask.png for comparison.</summary>
+        private static int RunBakeFacade(string[] args)
+        {
+            if (args.Length < 4) { Console.WriteLine("Usage: SimCityPak.exe bake-facade <input.package> <instanceHex> <outDir> [--variation N]"); return 2; }
+            string input = args[1]; string outDir = args[3];
+            uint inst;
+            try { inst = Convert.ToUInt32(args[2].Replace("0x", ""), 16); }
+            catch { Console.WriteLine("bad instance id: " + args[2]); return 2; }
+            Directory.CreateDirectory(outDir);
+
+            var lookup = BuildTextureLookupForInput(input, args);
+            var package = DatabasePackedFile.LoadFromFile(input);
+            var index = package.Indices.FirstOrDefault(i => i.TypeId == RW4_MODEL_TYPE_ID && i.InstanceId == inst);
+            if (index == null) { Console.WriteLine("model not found: " + inst.ToString("x8")); return 2; }
+
+            var model = new RW4Model();
+            using (var ms = new MemoryStream(index.GetIndexData(true))) model.Read(ms);
+            MaterialTextureReference palRef = null, maskRef = null;
+            foreach (RW4Section s in model.Sections)
+            {
+                RW4Material mat = s.obj as RW4Material;
+                if (mat == null || mat.Materials == null) continue;
+                foreach (var mr in mat.Materials)
+                {
+                    if (mr.Unknown1 == 0 && palRef == null) palRef = mr;
+                    if (mr.Unknown1 == 1 && maskRef == null) maskRef = mr;
+                }
+            }
+            if (palRef == null || maskRef == null) { Console.WriteLine("missing palette (u1=0) or mask (u1=1) slot"); return 2; }
+
+            // --palette <hex> overrides the palette source (e.g. the global tint atlas 0x9590d255)
+            uint palInst = palRef.TextureInstanceId;
+            for (int i = 4; i < args.Length - 1; i++)
+                if (args[i].Equals("--palette", StringComparison.OrdinalIgnoreCase))
+                    try { palInst = Convert.ToUInt32(args[i + 1].Replace("0x", ""), 16); } catch { }
+
+            DatabaseIndex palIdx, maskIdx;
+            lookup.TryGetValue(palInst, out palIdx);
+            lookup.TryGetValue(maskRef.TextureInstanceId, out maskIdx);
+            int pw = 0, ph = 0; float[] pal = palIdx != null ? DecodePaletteFloatRgba(palIdx, out pw, out ph) : null;
+            if (pal == null && palIdx != null)   // non-float palette (DXT / raster) -> decode to float RGBA
+            {
+                int bw2, bh2; byte[] prgba = DecodeTextureResourceRgba(palIdx, out bw2, out bh2);
+                if (prgba != null) { pw = bw2; ph = bh2; pal = new float[pw * ph * 4]; for (int i = 0; i < pal.Length; i++) pal[i] = prgba[i] / 255f; }
+            }
+            Console.WriteLine("palette instance: " + palInst.ToString("x8") + (palIdx == null ? "  (NOT FOUND in lookup)" : ""));
+            int mw = 0, mh = 0; byte[] mask = maskIdx != null ? DecodeTextureResourceRgba(maskIdx, out mw, out mh) : null;
+            if (pal == null || mask == null) { Console.WriteLine("decode failed: palette=" + (pal != null) + " mask=" + (mask != null)); return 2; }
+
+            RW4Mesh mesh = model.Sections.Select(s => s.obj as RW4Mesh).FirstOrDefault(x => x != null && x.vertices != null);
+            float palU, palU2; ComputeAveragePalette(mesh, out palU, out palU2);
+            // vertex COLOR r/g spread (tells us if palette selection varies per-vertex)
+            float rMin = 1, rMax = 0, gMin = 1, gMax = 0; int vc = 0;
+            if (mesh != null && mesh.vertices != null && mesh.vertices.vertices != null)
+                foreach (Vertex v in mesh.vertices.vertices)
+                {
+                    if (v.VertexComponents == null) continue;
+                    foreach (var comp in v.VertexComponents)
+                    {
+                        if (comp.Usage != D3DDECLUSAGE.D3DDECLUSAGE_COLOR) continue;
+                        var col = comp as VertexD3DColorValue;
+                        if (col != null) { float r = col.R / 255f, g = col.G / 255f; if (r < rMin) rMin = r; if (r > rMax) rMax = r; if (g < gMin) gMin = g; if (g > gMax) gMax = g; vc++; }
+                        break;
+                    }
+                }
+            int variation = GetIntArg(args, "--variation", 0);
+            float palV = variation * (1f / 8f);
+            string tag = inst.ToString("x8");
+            // Bake both layers' palette columns so we can see which carries the colour.
+            File.WriteAllBytes(Path.Combine(outDir, tag + "_baked_base_v" + variation + ".png"), GltfConverter.RgbaToPng(CompositeFacadePalette(mask, mw, mh, pal, pw, ph, palU, palV), mw, mh));
+            File.WriteAllBytes(Path.Combine(outDir, tag + "_baked_top_v" + variation + ".png"), GltfConverter.RgbaToPng(CompositeFacadePalette(mask, mw, mh, pal, pw, ph, palU2, palV), mw, mh));
+            File.WriteAllBytes(Path.Combine(outDir, tag + "_mask.png"), GltfConverter.RgbaToPng(mask, mw, mh));
+            File.WriteAllBytes(Path.Combine(outDir, tag + "_palette.png"), RenderPalettePng(pal, pw, ph, 20));
+            Console.WriteLine(string.Format("pal {0}x{1}  mask {2}x{3}  variation={4}", pw, ph, mw, mh, variation));
+            Console.WriteLine(string.Format("vtx COLOR: r[{0:f3}..{1:f3}] g[{2:f3}..{3:f3}]  avg palU={4:f3} palU2={5:f3}  verts={6}", rMin, rMax, gMin, gMax, palU, palU2, vc));
+            for (int row = 0; row < ph; row++)
+            {
+                var c0 = SamplePaletteBilinear(pal, pw, ph, 0.02f, (row + 0.5f) / ph);
+                var cM = SamplePaletteBilinear(pal, pw, ph, 0.5f, (row + 0.5f) / ph);
+                var cE = SamplePaletteBilinear(pal, pw, ph, 0.98f, (row + 0.5f) / ph);
+                Console.WriteLine(string.Format("  palette row{0}: L({1:f2},{2:f2},{3:f2}) M({4:f2},{5:f2},{6:f2}) R({7:f2},{8:f2},{9:f2})",
+                    row, c0[0], c0[1], c0[2], cM[0], cM[1], cM[2], cE[0], cE[1], cE[2]));
+            }
+            Console.WriteLine("Output: " + Path.GetFullPath(outDir));
+            return 0;
+        }
+
+        /// <summary>Diagnostic: finds every resource with a given instance id across the input
+        /// package and its siblings, printing TypeId/Group/sizes, the first bytes, and (for RW4 or
+        /// raster textures) the decoded header fields — WITHOUT a full decode, so it never OOMs on
+        /// a mis-sized texture. Used to identify what a referenced id (e.g. the global tint atlas
+        /// 0x9590d255) actually is.</summary>
+        private static int RunDescribeResource(string[] args)
+        {
+            if (args.Length < 3) { Console.WriteLine("Usage: SimCityPak.exe describe-resource <input.package> <instanceHex>"); return 2; }
+            string input = args[1]; uint inst;
+            try { inst = Convert.ToUInt32(args[2].Replace("0x", ""), 16); }
+            catch { Console.WriteLine("bad instance id: " + args[2]); return 2; }
+
+            var files = new List<string>();
+            if (input.EndsWith(".package", StringComparison.OrdinalIgnoreCase) && File.Exists(input))
+            {
+                string dir = Path.GetDirectoryName(Path.GetFullPath(input));
+                if (dir != null) files.AddRange(Directory.GetFiles(dir, "*.package"));
+            }
+            if (files.Count == 0) { Console.WriteLine("no packages found next to: " + input); return 2; }
+
+            int found = 0;
+            foreach (string pf in files)
+            {
+                DatabasePackedFile pkg;
+                try { pkg = DatabasePackedFile.LoadFromFile(pf); } catch { continue; }
+                foreach (DatabaseIndex idx in pkg.Indices)
+                {
+                    if (idx.InstanceId != inst) continue;
+                    found++;
+                    byte[] data = null; try { data = idx.GetIndexData(true); } catch (Exception ex) { Console.WriteLine("  (decompress failed: " + ex.Message + ")"); }
+                    string hdr = "";
+                    if (data != null) { int n = Math.Min(48, data.Length); var sb = new StringBuilder(); for (int i = 0; i < n; i++) sb.Append(data[i].ToString("x2") + (i % 4 == 3 ? " " : "")); hdr = sb.ToString(); }
+                    Console.WriteLine(string.Format("{0}  T={1:x8} G={2:x8} I={3:x8}  dec={4}  [0..48]= {5}",
+                        Path.GetFileName(pf), idx.TypeId, idx.GroupContainer, idx.InstanceId, data != null ? data.Length : -1, hdr));
+                    if (data != null && idx.TypeId == RW4_MODEL_TYPE_ID)
+                    {
+                        try
+                        {
+                            var m = new RW4Model(); using (var ms = new MemoryStream(data)) m.Read(ms);
+                            foreach (RW4Section s in m.Sections) { var t = s.obj as Texture; if (t != null) Console.WriteLine(string.Format("    RW4 Texture: type={0} {1}x{2}", t.textureType, t.width, t.height)); }
+                        }
+                        catch (Exception ex) { Console.WriteLine("    RW4 parse err: " + ex.Message); }
+                    }
+                    else if (data != null && idx.TypeId == TEX_RASTER_TYPE_ID && data.Length >= 28)
+                        Console.WriteLine(string.Format("    raster: w={0} h={1} pixFmt={2} blockSize={3}", BE(data, 4), BE(data, 8), BE(data, 20), BE(data, 24)));
+                }
+            }
+            Console.WriteLine("matches=" + found);
+            return 0;
+        }
+
+        private static string DescribeTexture(DatabaseIndex tdi, ref bool has116)
+        {
+            try
+            {
+                if (tdi.TypeId == TEX_RASTER_TYPE_ID)
+                {
+                    byte[] data = tdi.GetIndexData(true);
+                    if (data.Length >= 24) return string.Format("raster/pf{0}/{1}x{2}", BE(data, 20), BE(data, 4), BE(data, 8));
+                    return "raster";
+                }
+                var model = new RW4Model();
+                using (var ms = new MemoryStream(tdi.GetIndexData(true))) model.Read(ms);
+                var texSec = model.Sections.FirstOrDefault(x => x.TypeCode == SectionTypeCodes.Texture && x.obj is Texture);
+                if (texSec == null) return "rw4/notex";
+                Texture t = (Texture)texSec.obj;
+                if (t.textureType == 116) has116 = true;
+                return string.Format("rw4/tt{0}/{1}x{2}", t.textureType, t.width, t.height);
+            }
+            catch { return "err"; }
+        }
+
 
 
         // ----- texture resolution (for textured model export) ---------------
@@ -241,6 +568,33 @@ namespace SimCityPak.Cli
                 if (!map.ContainsKey(idx.InstanceId)) map[idx.InstanceId] = idx;
             }
             return map;
+        }
+
+        /// <summary>Adds texture resources from every <c>.package</c> file found in the given
+        /// directories to an existing lookup, WITHOUT overwriting entries already present (so the
+        /// caller's loaded/edited resources win). Lets the GUI resolve textures that live in
+        /// sibling packages (e.g. SimCity_Graphics.package) when only one package is open. Never
+        /// throws per package.</summary>
+        private static void AddSiblingTextures(Dictionary<uint, DatabaseIndex> map, IEnumerable<string> dirs)
+        {
+            if (map == null || dirs == null) return;
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string dir in dirs)
+            {
+                if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
+                string[] files;
+                try { files = Directory.GetFiles(dir, "*.package"); } catch { continue; }
+                foreach (string pf in files)
+                {
+                    if (!seen.Add(pf)) continue;
+                    try
+                    {
+                        foreach (var kv in BuildTextureLookup(DatabasePackedFile.LoadFromFile(pf).Indices))
+                            if (!map.ContainsKey(kv.Key)) map[kv.Key] = kv.Value;
+                    }
+                    catch (Exception ex) { Logger.Exception("sibling texture index " + Path.GetFileName(pf), ex); }
+                }
+            }
         }
 
         /// <summary>
@@ -303,6 +657,7 @@ namespace SimCityPak.Cli
                 byte[] baseRgba = null, fbRgba = null, normalRgba = null, palLum = null;
                 int baseW = 0, baseH = 0, fbW = 0, fbH = 0, nW = 0, nH = 0, palW = 0;
                 long baseArea = -1, fbArea = -1, nArea = -1;
+                float[] palFloat = null; int palFW = 0, palFH = 0;   // full HDR palette (texType 116)
 
                 foreach (RW4Section s in mesh.model.Sections)
                 {
@@ -313,12 +668,20 @@ namespace SimCityPak.Cli
                         DatabaseIndex tdi;
                         if (mr.TextureInstanceId == 0) continue;
                         if (!lookup.TryGetValue(mr.TextureInstanceId, out tdi)) continue;
-                        // The per-model facade palette (float32 strip, textureType 116): keep its
-                        // row-0 luminance for compositing rather than treating it as a colour map.
+                        // The per-model facade palette (float32 strip, textureType 116). Always keep
+                        // its row-0 luminance (the default greyscale facade path). Additionally
+                        // decode the FULL HDR palette when the experimental --facade-color bake is
+                        // on (the real building4 BuildingPaletteSample composite).
                         if (palLum == null)
                         {
+                            if (_facadeColorExperimental && palFloat == null)
+                            {
+                                float[] pf = DecodePaletteFloatRgba(tdi, out palFW, out palFH);
+                                if (pf != null) palFloat = pf;
+                            }
                             int pw; byte[] lum = DecodePaletteLuminance(tdi, out pw);
                             if (lum != null) { palLum = lum; palW = pw; continue; }
+                            if (palFloat != null) continue;   // a palette, even if the luminance helper declined
                         }
                         int w, h;
                         byte[] rgba = DecodeTextureResourceRgba(tdi, out w, out h);
@@ -340,11 +703,20 @@ namespace SimCityPak.Cli
                 if (colorRgba == null && normalRgba == null) return null;
 
                 // SimCity has no baked albedo. The colour map is a false-colour region/zone atlas
-                // whose RED channel indexes the per-model palette. The palette is a 4-row HDR
-                // material table, not an RGB LUT, but its row 0 is an albedo *luminance*; map the
-                // region atlas through it to get a clean grey facade (light walls, dark windows)
-                // instead of the neon atlas. Full colour needs the GlassBox shader.
-                if (colorRgba != null && palLum != null && palW > 1)
+                // that the GlassBox building4 pixel shader recolours through the per-model HDR
+                // palette (BuildingPaletteSample). We now reproduce that composite offline: the
+                // mask's R,G sub-sample the palette cell, the mesh's vertex COLOR selects the
+                // palette column (palU), the chosen variation row selects palV, and the mask's B
+                // is a brightness multiplier. This yields the real facade colour, not greyscale.
+                // Falls back to the old row-0 luminance greyscale when only that is available.
+                if (_facadeColorExperimental && colorRgba != null && palFloat != null && palFW > 0 && palFH > 0)
+                {
+                    float palU, palU2;
+                    ComputeAveragePalette(mesh, out palU, out palU2);
+                    float palV = _facadeVariation * (1f / 8f);   // BuildingPaletteVariationVS: row/8
+                    colorRgba = CompositeFacadePalette(colorRgba, cW, cH, palFloat, palFW, palFH, palU, palV);
+                }
+                else if (colorRgba != null && palLum != null && palW > 1)
                     colorRgba = CompositeFacadeLuminance(colorRgba, cW, cH, palLum, palW);
 
                 var result = new GltfConverter.MaterialTextures();
@@ -358,6 +730,70 @@ namespace SimCityPak.Cli
                 return result;
             }
             catch (Exception ex) { Logger.Exception("ResolveTextures", ex); return null; }
+        }
+
+        /// <summary>Per-vertex facade palette albedo for glTF COLOR_0 (path A, faithful PBR): for
+        /// each vertex, select the palette column from its COLOR.r/.g (palU/palU2, the two layers),
+        /// sample the model's HDR palette (material slot u1=0, texType 116) at the chosen
+        /// variation row, and take the brighter of the two layers. Values stay LINEAR (glTF COLOR_0
+        /// is linear) so a PBR viewer lights them. Returns vCount*4 RGBA bytes, or null when the
+        /// model has no palette (non-facade meshes keep their normal textures). Gated by
+        /// --facade-color while under development.</summary>
+        private static byte[] ResolvePerVertexColor(RW4Mesh mesh, Dictionary<uint, DatabaseIndex> lookup)
+        {
+            try
+            {
+                if (!_facadeColorExperimental) return null;
+                if (lookup == null || mesh == null || mesh.model == null || mesh.vertices == null || mesh.vertices.vertices == null) return null;
+
+                float[] pal = null; int pw = 0, ph = 0;
+                foreach (RW4Section s in mesh.model.Sections)
+                {
+                    RW4Material mat = s.obj as RW4Material;
+                    if (mat == null || mat.Materials == null) continue;
+                    foreach (var mr in mat.Materials)
+                    {
+                        if (mr.TextureInstanceId == 0) continue;
+                        DatabaseIndex tdi;
+                        if (!lookup.TryGetValue(mr.TextureInstanceId, out tdi)) continue;
+                        float[] pf = DecodePaletteFloatRgba(tdi, out pw, out ph);
+                        if (pf != null) { pal = pf; break; }
+                    }
+                    if (pal != null) break;
+                }
+                if (pal == null) return null;
+
+                float palV = _facadeVariation * (1f / 8f) + 0.25f / 8f;   // centre of the variation row
+                var verts = mesh.vertices.vertices;
+                int vCount = verts.Length;
+                byte[] outp = new byte[vCount * 4];
+                int vi = 0;
+                foreach (Vertex v in verts)
+                {
+                    float cr = 0, cg = 0;
+                    if (v.VertexComponents != null)
+                        foreach (var comp in v.VertexComponents)
+                        {
+                            if (comp.Usage != D3DDECLUSAGE.D3DDECLUSAGE_COLOR) continue;
+                            var col = comp as VertexD3DColorValue;
+                            if (col != null) { cr = col.R / 255f; cg = col.G / 255f; }
+                            break;
+                        }
+                    const float k = 255f / 256f;
+                    float[] cB = SamplePaletteBilinear(pal, pw, ph, cr * k, palV);
+                    float[] cT = SamplePaletteBilinear(pal, pw, ph, cg * k, palV);
+                    float lumB = cB[0] * 0.3f + cB[1] * 0.59f + cB[2] * 0.11f;
+                    float lumT = cT[0] * 0.3f + cT[1] * 0.59f + cT[2] * 0.11f;
+                    float[] c = lumT >= lumB ? cT : cB;    // the lit layer carries the colour
+                    outp[vi * 4]     = ToByteClamp(c[0] * 2f);
+                    outp[vi * 4 + 1] = ToByteClamp(c[1] * 2f);
+                    outp[vi * 4 + 2] = ToByteClamp(c[2] * 2f);
+                    outp[vi * 4 + 3] = 255;
+                    vi++;
+                }
+                return outp;
+            }
+            catch (Exception ex) { Logger.Exception("ResolvePerVertexColor", ex); return null; }
         }
 
         /// <summary>SimCity's normal maps are "pink": flat areas ~ (255,128,128), i.e. the up
@@ -435,6 +871,147 @@ namespace SimCityPak.Cli
                 return lum;
             }
             catch { return null; }
+        }
+
+        /// <summary>Reads the per-model facade palette (float32 RGBA, textureType 116) as a full
+        /// width x height HDR palette (all rows/channels), for the real BuildingPaletteSample
+        /// composite. Returns null if the resource isn't such a palette.</summary>
+        private static float[] DecodePaletteFloatRgba(DatabaseIndex tdi, out int width, out int height)
+        {
+            width = 0; height = 0;
+            if (tdi.TypeId != RW4_MODEL_TYPE_ID) return null;
+            try
+            {
+                var model = new RW4Model();
+                using (var ms = new MemoryStream(tdi.GetIndexData(true))) model.Read(ms);
+                var texSec = model.Sections.FirstOrDefault(x => x.TypeCode == SectionTypeCodes.Texture && x.obj is Texture);
+                if (texSec == null) return null;
+                Texture t = (Texture)texSec.obj;
+                if (t.textureType != 116) return null;        // D3DFMT_A32B32G32R32F (float32 RGBA)
+                int w = t.width, h = t.height; byte[] blob = t.texData != null ? t.texData.blob : null;
+                if (w <= 0 || h <= 0 || blob == null || blob.LongLength < (long)w * h * 16) return null;
+                float[] pal = new float[w * h * 4];
+                for (int i = 0; i < w * h; i++)
+                {
+                    pal[i * 4]     = BitConverter.ToSingle(blob, i * 16);
+                    pal[i * 4 + 1] = BitConverter.ToSingle(blob, i * 16 + 4);
+                    pal[i * 4 + 2] = BitConverter.ToSingle(blob, i * 16 + 8);
+                    pal[i * 4 + 3] = BitConverter.ToSingle(blob, i * 16 + 12);
+                }
+                width = w; height = h;
+                return pal;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Bilinear sample (clamp to edge, UV in [0,1]) of an HDR float RGBA palette,
+        /// matching the GlassBox D3D9 linear sampler used by BuildingPaletteSample.</summary>
+        private static float[] SamplePaletteBilinear(float[] pal, int w, int h, float u, float v)
+        {
+            if (u < 0) u = 0; else if (u > 1) u = 1;
+            if (v < 0) v = 0; else if (v > 1) v = 1;
+            float fx = u * w - 0.5f, fy = v * h - 0.5f;
+            int x0 = (int)Math.Floor(fx), y0 = (int)Math.Floor(fy);
+            float tx = fx - x0, ty = fy - y0;
+            int x1 = x0 + 1, y1 = y0 + 1;
+            if (x0 < 0) x0 = 0; else if (x0 > w - 1) x0 = w - 1;
+            if (x1 < 0) x1 = 0; else if (x1 > w - 1) x1 = w - 1;
+            if (y0 < 0) y0 = 0; else if (y0 > h - 1) y0 = h - 1;
+            if (y1 < 0) y1 = 0; else if (y1 > h - 1) y1 = h - 1;
+            var outc = new float[4];
+            for (int c = 0; c < 4; c++)
+            {
+                float a = pal[(y0 * w + x0) * 4 + c], b = pal[(y0 * w + x1) * 4 + c];
+                float cc = pal[(y1 * w + x0) * 4 + c], d = pal[(y1 * w + x1) * 4 + c];
+                float top = a + (b - a) * tx, bot = cc + (d - cc) * tx;
+                outc[c] = top + (bot - top) * ty;
+            }
+            return outc;
+        }
+
+        /// <summary>Reproduces the building4 facade colour composite (BuildingPaletteSample) per
+        /// mask texel: palette-U = palU + mask.r sub-sample, palette-V = palV (variation) + mask.g
+        /// sub-sample, result scaled by mask.b*2 (the brightness term). Clamps the HDR result to
+        /// 8-bit. Keeps the mask alpha. This is the base layer; the second (relief) layer needs the
+        /// mesh's second UV set and is not baked here.</summary>
+        private static byte[] CompositeFacadePalette(byte[] maskRgba, int w, int h, float[] pal, int pw, int ph, float palU, float palV)
+        {
+            // kPaletteSize = (256,8): sub-sample scale = invSize*0.5, offset = invSize*0.25.
+            const float subScaleX = 0.5f / 256f, subOffX = 0.25f / 256f;
+            const float subScaleY = 0.5f / 8f, subOffY = 0.25f / 8f;
+            byte[] outp = new byte[w * h * 4];
+            for (int i = 0; i < w * h; i++)
+            {
+                float mr = maskRgba[i * 4] / 255f, mg = maskRgba[i * 4 + 1] / 255f, mb = maskRgba[i * 4 + 2] / 255f;
+                float su = palU + mr * subScaleX + subOffX;
+                float sv = palV + mg * subScaleY + subOffY;
+                float[] c = SamplePaletteBilinear(pal, pw, ph, su, sv);
+                float bright = mb * 2f;
+                outp[i * 4]     = ToByteClamp(c[0] * bright);
+                outp[i * 4 + 1] = ToByteClamp(c[1] * bright);
+                outp[i * 4 + 2] = ToByteClamp(c[2] * bright);
+                outp[i * 4 + 3] = maskRgba[i * 4 + 3];
+            }
+            return outp;
+        }
+
+        private static byte ToByteClamp(float v)
+        {
+            int x = (int)(v * 255f + 0.5f);
+            return (byte)(x < 0 ? 0 : (x > 255 ? 255 : x));
+        }
+
+        /// <summary>Renders an HDR float palette to a PNG (clamped), nearest-upscaled by
+        /// <paramref name="scale"/> so a tiny W x4 strip is viewable.</summary>
+        private static byte[] RenderPalettePng(float[] pal, int w, int h, int scale)
+        {
+            int ow = w * scale, oh = h * scale;
+            byte[] rgba = new byte[ow * oh * 4];
+            for (int y = 0; y < oh; y++)
+                for (int x = 0; x < ow; x++)
+                {
+                    int sx = x / scale, sy = y / scale, si = (sy * w + sx) * 4, di = (y * ow + x) * 4;
+                    rgba[di] = ToByteClamp(pal[si]); rgba[di + 1] = ToByteClamp(pal[si + 1]);
+                    rgba[di + 2] = ToByteClamp(pal[si + 2]); rgba[di + 3] = 255;
+                }
+            return GltfConverter.RgbaToPng(rgba, ow, oh);
+        }
+
+        /// <summary>Average per-vertex COLOR r/g over the mesh, scaled to palette U (the building4
+        /// VS does palU = color.r * (255/256)). COLOR.r selects the base palette column (palU),
+        /// COLOR.g the top-layer column (palU2). Averaging is an approximation for meshes whose
+        /// vertex colour varies; it is exact for the (common) uniform-colour facade mesh.</summary>
+        private static void ComputeAveragePalette(RW4Mesh mesh, out float palU, out float palU2)
+        {
+            palU = 0; palU2 = 0;
+            double sr = 0, sg = 0; int n = 0;
+            if (mesh != null && mesh.vertices != null && mesh.vertices.vertices != null)
+            {
+                foreach (Vertex v in mesh.vertices.vertices)
+                {
+                    if (v.VertexComponents == null) continue;
+                    foreach (var comp in v.VertexComponents)
+                    {
+                        if (comp.Usage != D3DDECLUSAGE.D3DDECLUSAGE_COLOR) continue;
+                        var col = comp as VertexD3DColorValue;
+                        if (col != null) { sr += col.R / 255.0; sg += col.G / 255.0; n++; }
+                        break;
+                    }
+                }
+            }
+            const float k = 255f / 256f;
+            if (n > 0) { palU = (float)(sr / n) * k; palU2 = (float)(sg / n) * k; }
+        }
+
+        /// <summary>Reads an integer value following <paramref name="name"/> in the args
+        /// (e.g. <c>--variation 3</c>); returns <paramref name="def"/> if absent/unparseable.</summary>
+        private static int GetIntArg(string[] args, string name, int def)
+        {
+            if (args == null) return def;
+            for (int i = 0; i < args.Length - 1; i++)
+                if (args[i].Equals(name, StringComparison.OrdinalIgnoreCase))
+                { int v; if (int.TryParse(args[i + 1], out v)) return v; }
+            return def;
         }
 
         /// <summary>Maps a region/zone mask through the palette luminance (mask RED channel is a
@@ -559,6 +1136,62 @@ namespace SimCityPak.Cli
                 if (!string.IsNullOrEmpty(s) && File.Exists(s)) return s;
             }
             catch { }
+            // Fall back to auto-detecting the game's locale package next to the input package.
+            try
+            {
+                if (args.Length > 1 && !string.IsNullOrEmpty(args[1]))
+                {
+                    string inp = args[1];
+                    string dir = File.Exists(inp) ? Path.GetDirectoryName(Path.GetFullPath(inp))
+                               : (Directory.Exists(inp) ? Path.GetFullPath(inp) : null);
+                    if (dir != null) { string d = AutoDetectLocaleFile(new[] { dir }); if (d != null) return d; }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>Tries to locate the game's localized-name package automatically by looking for
+        /// <c>Locale\&lt;lang&gt;\Data.package</c> under each given directory (and its parent) —
+        /// SimCity ships it beside the data packages, e.g.
+        /// <c>SimCityData\Locale\en-us\Data.package</c>. Prefers en-us, then any English locale,
+        /// then the first one found. Returns the path or null. Used so the GUI "Export all" names
+        /// assets even when no locale is set in Settings.</summary>
+        public static string AutoDetectLocaleFile(IEnumerable<string> searchDirs)
+        {
+            if (searchDirs == null) return null;
+            // Search each directory and its parent (packages may sit one level from the Locale root).
+            var dirs = new List<string>();
+            foreach (string d in searchDirs)
+            {
+                if (string.IsNullOrEmpty(d)) continue;
+                dirs.Add(d);
+                try { var parent = Directory.GetParent(d); if (parent != null) dirs.Add(parent.FullName); } catch { }
+            }
+            foreach (string dir in dirs)
+            {
+                try
+                {
+                    string localeRoot = Path.Combine(dir, "Locale");
+                    if (!Directory.Exists(localeRoot)) continue;
+                    string enus = Path.Combine(localeRoot, "en-us", "Data.package");
+                    if (File.Exists(enus)) return enus;
+                    // any English locale next
+                    foreach (string sub in Directory.GetDirectories(localeRoot))
+                    {
+                        string data = Path.Combine(sub, "Data.package");
+                        if (File.Exists(data) && Path.GetFileName(sub).StartsWith("en", StringComparison.OrdinalIgnoreCase))
+                            return data;
+                    }
+                    // else the first locale that has a Data.package
+                    foreach (string sub in Directory.GetDirectories(localeRoot))
+                    {
+                        string data = Path.Combine(sub, "Data.package");
+                        if (File.Exists(data)) return data;
+                    }
+                }
+                catch { }
+            }
             return null;
         }
 
@@ -1206,7 +1839,7 @@ namespace SimCityPak.Cli
             int glb = 0, tex = 0, fails = 0;
             Action<byte[], string> handle = (data, baseName) =>
             {
-                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter(mesh => ResolveTextures(mesh, texLookup)).Export(m, p)); }
+                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter(mesh => ResolveTextures(mesh, texLookup), mesh => ResolvePerVertexColor(mesh, texLookup)).Export(m, p)); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all model " + baseName, ex); Console.WriteLine("FAIL " + baseName + " (model) :: " + ex.Message); }
                 try { tex += ExportRw4Textures(data, outDir, baseName, format); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all textures " + baseName, ex); Console.WriteLine("FAIL " + baseName + " (textures) :: " + ex.Message); }
@@ -1254,14 +1887,17 @@ namespace SimCityPak.Cli
         /// <paramref name="localeFile"/> is provided. Returns a short summary; used by
         /// the GUI "Export all" menu. Never throws (errors are logged per resource).
         /// </summary>
-        public static string ExportAllToFolder(IEnumerable<DatabaseIndex> indices, string outDir, string localeFile, string format = "png")
+        public static string ExportAllToFolder(IEnumerable<DatabaseIndex> indices, string outDir, string localeFile, string format = "png", IEnumerable<string> textureSearchDirs = null)
         {
             Directory.CreateDirectory(outDir);
             Logger.Info("Export-all -> " + outDir + " (textures: " + format + ")" + (string.IsNullOrEmpty(localeFile) ? "" : " (locale: " + localeFile + ")"));
             var nameMap = BuildLocaleNameMap(indices, localeFile);
-            // Resolve model materials against every texture in the supplied resources
-            // (for the GUI that's all loaded packages, so shared graphics textures apply).
+            // Resolve model materials against every texture in the supplied resources (the loaded
+            // packages). When textureSearchDirs is given, ALSO index the sibling .package files on
+            // disk (e.g. SimCity_Graphics.package) so textures resolve even if the user only opened
+            // one package — the loaded resources keep priority (so edits still win).
             var texLookup = BuildTextureLookup(indices);
+            if (textureSearchDirs != null) AddSiblingTextures(texLookup, textureSearchDirs);
             var used = new HashSet<string>();
             int glb = 0, tex = 0, fails = 0, models = 0, named = 0;
             foreach (DatabaseIndex index in indices)
@@ -1275,7 +1911,7 @@ namespace SimCityPak.Cli
                 byte[] data;
                 try { data = index.GetIndexData(true); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all read " + baseName, ex); continue; }
-                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter(mesh => ResolveTextures(mesh, texLookup)).Export(m, p)); }
+                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter(mesh => ResolveTextures(mesh, texLookup), mesh => ResolvePerVertexColor(mesh, texLookup)).Export(m, p)); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all model " + baseName, ex); }
                 try { tex += ExportRw4Textures(data, outDir, baseName, format); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all textures " + baseName, ex); }

@@ -59,8 +59,12 @@ Upstream `main` (altinctrl/SimCityPak) did **not** build as-is. Fixes applied (f
    `xnafx40_redist.msi` (via `msiexec /a`, no system install) into `References\Xna\x86\`.
    The two referenced DLLs (Framework + Graphics) are now **committed** to the repo, so a
    fresh clone builds without extra setup.
-3. Retarget v4.0 → **v4.8** at build time (`/p:TargetFrameworkVersion=v4.8`,
-   `/p:TargetFrameworkProfile=` to drop the dead Client Profile).
+3. Retarget v4.0 → **v4.8**. All three projects now target v4.8 **in-file** (SimCityPak,
+   SimCityPak.Packages, and nQuant.Core — the last fixed 2026-11-19; v4.0 was making VS "load
+   fail" nQuant.Core, cascading into `CS0006: nQuant.Core.dll not found`). The solution now opens
+   in Visual Studio without the "target framework not supported" prompt. The CLI build still
+   passes `/p:TargetFrameworkVersion=v4.8` `/p:TargetFrameworkProfile=` (drops the dead Client
+   Profile) — now redundant but harmless.
 4. Added a fallback `OutputPath` to `nQuant.Core.csproj` and `SimCityPak.Packages.csproj`
    (they only defined it for AnyCPU; the x86 platform propagated in and failed).
 5. Source typo: `MainWindow.xaml.cs` called `InsertSubFile` → should be `InsertIndex`.

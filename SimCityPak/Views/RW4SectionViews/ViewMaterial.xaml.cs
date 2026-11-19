@@ -82,6 +82,7 @@ namespace SimCityPak
                 System.Windows.Forms.FolderBrowserDialog dlg = new System.Windows.Forms.FolderBrowserDialog();
                 dlg.Description = "Select where to extract the files to..."; 
                 if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                using (SimCityPak.MainWindow.Busy("Extracting material textures…"))
                 {
                     string selectedPath = dlg.SelectedPath;
                     foreach (MaterialTextureReference mat in vertexArraySection.Materials)

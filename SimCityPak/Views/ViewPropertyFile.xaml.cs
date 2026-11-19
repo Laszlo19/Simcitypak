@@ -613,6 +613,7 @@ namespace SimCityPak
                 {
                     SaveFileDialog dialog = new SaveFileDialog();
                     if (dialog.ShowDialog().GetValueOrDefault(false))
+                    using (SimCityPak.MainWindow.Busy("Saving package…"))
                     {
                         List<DatabaseIndex> indices = new List<DatabaseIndex>();
 

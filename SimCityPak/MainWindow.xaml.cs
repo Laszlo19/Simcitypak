@@ -35,6 +35,9 @@ namespace SimCityPak
         public MainWindow()
         {
             InitializeComponent();
+            _instance = this;
+            // Windows taskbar progress/status for long operations (see the Busy* helpers below).
+            this.TaskbarItemInfo = new System.Windows.Shell.TaskbarItemInfo();
             view = new ListCollectionView(DatabaseManager.Instance.Indices);
             view.Filter = TextFilter;
             dataGridInstances.ItemsSource = view;
@@ -42,6 +45,86 @@ namespace SimCityPak
             packageDataGrid.ItemsSource = packageView;
             _currentPackageFiles = new List<string>();
         }
+
+        // ---- Taskbar busy/progress status ----------------------------------------------------
+        // Shows a working indicator on the app's Windows taskbar button (animated bar + tooltip)
+        // for the duration of a long operation: package load/save, the folder exporters, deploy,
+        // etc. Reentrant (nested Begin/End keep it busy until the outermost End), thread-safe
+        // (marshals to the UI thread), and a no-op before the window exists.
+
+        private static MainWindow _instance;
+        private static int _busyCount;   // touched only on the UI thread
+
+        /// <summary>Marks the app busy and returns a token to dispose when done:
+        /// <c>using (MainWindow.Busy("Exporting…")) { ... }</c>.</summary>
+        public static IDisposable Busy(string description = "Working…")
+        {
+            BeginBusy(description);
+            return new BusyToken();
+        }
+
+        /// <summary>Turn the taskbar button's indeterminate "working" indicator on.</summary>
+        public static void BeginBusy(string description = "Working…")
+        {
+            RunOnUi(() =>
+            {
+                _busyCount++;
+                var tb = _instance != null ? _instance.TaskbarItemInfo : null;
+                if (tb != null)
+                {
+                    tb.ProgressState = System.Windows.Shell.TaskbarItemProgressState.Indeterminate;
+                    tb.Description = description;
+                }
+            });
+        }
+
+        /// <summary>Balance a <see cref="BeginBusy"/>; clears the taskbar status at the outermost End.</summary>
+        public static void EndBusy()
+        {
+            RunOnUi(() =>
+            {
+                if (_busyCount > 0) _busyCount--;
+                if (_busyCount == 0)
+                {
+                    var tb = _instance != null ? _instance.TaskbarItemInfo : null;
+                    if (tb != null)
+                    {
+                        tb.ProgressState = System.Windows.Shell.TaskbarItemProgressState.None;
+                        tb.ProgressValue = 0;
+                        tb.Description = null;
+                    }
+                }
+            });
+        }
+
+        /// <summary>Switch to a definite 0..1 progress bar (for ops that know their progress).
+        /// Still call <see cref="EndBusy"/> when finished.</summary>
+        public static void ReportProgress(double fraction, string description = null)
+        {
+            RunOnUi(() =>
+            {
+                var tb = _instance != null ? _instance.TaskbarItemInfo : null;
+                if (tb == null) return;
+                tb.ProgressState = System.Windows.Shell.TaskbarItemProgressState.Normal;
+                tb.ProgressValue = fraction < 0 ? 0 : (fraction > 1 ? 1 : fraction);
+                if (description != null) tb.Description = description;
+            });
+        }
+
+        private static void RunOnUi(Action a)
+        {
+            var w = _instance;
+            if (w == null) return;
+            if (w.Dispatcher.CheckAccess()) a();
+            else w.Dispatcher.BeginInvoke(a);
+        }
+
+        private sealed class BusyToken : IDisposable
+        {
+            private bool _done;
+            public void Dispose() { if (_done) return; _done = true; EndBusy(); }
+        }
+        // --------------------------------------------------------------------------------------
 
         private void MenuItem_Click(object sender, RoutedEventArgs e)
         {
@@ -57,6 +140,7 @@ namespace SimCityPak
         private void loadPackagesFromPath(string[] paths)
         {
             Logger.Info("Loading packages: " + string.Join(", ", paths));
+            BeginBusy("Loading packages…");
             try
             {
                 DatabaseManager.Instance.LoadPackages(paths);
@@ -68,6 +152,10 @@ namespace SimCityPak
             {
                 Logger.Exception("loadPackagesFromPath", ex);
                 throw;
+            }
+            finally
+            {
+                EndBusy();
             }
         }
 
@@ -88,12 +176,31 @@ namespace SimCityPak
             Logger.Info("GUI: export all -> " + folder);
             var indices = DatabaseManager.Instance.Indices.ToList();   // snapshot for the worker thread
             string locale = Properties.Settings.Default.LocaleFile;
+            if (string.IsNullOrEmpty(locale) || !System.IO.File.Exists(locale))
+            {
+                // No locale set — auto-detect the game's Locale\<lang>\Data.package next to the
+                // loaded packages so exported assets get their real names instead of hash ids.
+                var localeDirs = DatabaseManager.Instance.PackageFiles
+                    .Where(p => p != null && p.packageFileInfo != null && p.packageFileInfo.Directory != null)
+                    .Select(p => p.packageFileInfo.Directory.FullName)
+                    .Distinct();
+                string detected = Cli.CliRunner.AutoDetectLocaleFile(localeDirs);
+                if (detected != null) { locale = detected; Logger.Info("Auto-detected locale file for export: " + detected); }
+            }
+            // Snapshot the loaded packages' directories so the exporter can also pull textures from
+            // sibling .package files on disk (e.g. SimCity_Graphics.package) — so textures resolve
+            // even when only one package is open.
+            var textureDirs = DatabaseManager.Instance.PackageFiles
+                .Where(p => p != null && p.packageFileInfo != null && p.packageFileInfo.Directory != null)
+                .Select(p => p.packageFileInfo.Directory.FullName)
+                .Distinct().ToList();
             System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
+            BeginBusy("Exporting all models + textures…");
 
             System.Threading.Tasks.Task.Run(() =>
             {
                 string summary;
-                try { summary = Cli.CliRunner.ExportAllToFolder(indices, folder, locale); }
+                try { summary = Cli.CliRunner.ExportAllToFolder(indices, folder, locale, "png", textureDirs); }
                 catch (Exception ex)
                 {
                     Logger.Exception("GUI export-all", ex);
@@ -102,6 +209,7 @@ namespace SimCityPak
                 Dispatcher.Invoke(() =>
                 {
                     System.Windows.Input.Mouse.OverrideCursor = null;
+                    EndBusy();
                     System.Windows.MessageBox.Show(summary + "\n\nFolder: " + folder, "Export all",
                         MessageBoxButton.OK, MessageBoxImage.Information);
                 });
@@ -132,7 +240,19 @@ namespace SimCityPak
             Logger.Info("GUI: export combined props -> " + folder + (json ? " (json)" : " (txt)"));
             var indices = DatabaseManager.Instance.Indices.ToList();   // snapshot for the worker thread
             string locale = Properties.Settings.Default.LocaleFile;
+            if (string.IsNullOrEmpty(locale) || !System.IO.File.Exists(locale))
+            {
+                // No locale set — auto-detect the game's Locale\<lang>\Data.package next to the
+                // loaded packages so exported assets get their real names instead of hash ids.
+                var localeDirs = DatabaseManager.Instance.PackageFiles
+                    .Where(p => p != null && p.packageFileInfo != null && p.packageFileInfo.Directory != null)
+                    .Select(p => p.packageFileInfo.Directory.FullName)
+                    .Distinct();
+                string detected = Cli.CliRunner.AutoDetectLocaleFile(localeDirs);
+                if (detected != null) { locale = detected; Logger.Info("Auto-detected locale file for export: " + detected); }
+            }
             System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
+            BeginBusy("Exporting combined properties…");
 
             System.Threading.Tasks.Task.Run(() =>
             {
@@ -146,6 +266,7 @@ namespace SimCityPak
                 Dispatcher.Invoke(() =>
                 {
                     System.Windows.Input.Mouse.OverrideCursor = null;
+                    EndBusy();
                     System.Windows.MessageBox.Show(summary + "\n\nFolder: " + folder, "Export combined properties",
                         MessageBoxButton.OK, MessageBoxImage.Information);
                 });
@@ -326,6 +447,7 @@ namespace SimCityPak
             if (!dlg.ShowDialog().GetValueOrDefault(false)) return;
 
             bool json = dlg.FilterIndex == 2 || dlg.FileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+            using (Busy("Exporting properties…"))
             try
             {
                 PropertyFile pf = new PropertyFile(index);
@@ -348,6 +470,7 @@ namespace SimCityPak
                 string path;
                 if (!ModernFolderDialog.TryPick("Choose Export Folder", out path)) return;
                 if (!Directory.Exists(path)) return;
+                using (Busy("Exporting resources…"))
                 foreach (var selectedItem in dataGridInstances.SelectedItems)
                 {
                     DatabaseIndex element = selectedItem as DatabaseIndex;
@@ -370,6 +493,7 @@ namespace SimCityPak
                 DatabaseIndex index = (DatabaseIndex)((MenuItem)sender).DataContext;
                 fileDialog.FileName = index.GetExportFileName();
                 if (fileDialog.ShowDialog().GetValueOrDefault(false))
+                using (Busy("Exporting resource…"))
                 {
                     try
                     {
@@ -389,6 +513,7 @@ namespace SimCityPak
             dlg.Filter = "Package Files|*.package";
             dlg.DefaultExt = "package";
             if (dlg.ShowDialog().GetValueOrDefault(false))
+            using (Busy("Saving package…"))
             {
                 List<DatabaseIndex> indices = new List<DatabaseIndex>();
                 foreach (var selectedItem in dataGridInstances.SelectedItems)
@@ -630,11 +755,16 @@ namespace SimCityPak
             DatabasePackedFile PackageFile = (DatabasePackedFile)packageDataGrid.SelectedItem;
             if (PackageFile != null)
             {
-                string tempFileName = string.Format("{0}\\{1}.temp", PackageFile.packageFileInfo.Directory.FullName, Guid.NewGuid());
-                string originalFileName = PackageFile.packageFileInfo.FullName;
-                PackageFile.SaveAs(tempFileName);
-                File.Delete(originalFileName);
-                File.Move(tempFileName, originalFileName);
+                BeginBusy("Saving package…");
+                try
+                {
+                    string tempFileName = string.Format("{0}\\{1}.temp", PackageFile.packageFileInfo.Directory.FullName, Guid.NewGuid());
+                    string originalFileName = PackageFile.packageFileInfo.FullName;
+                    PackageFile.SaveAs(tempFileName);
+                    File.Delete(originalFileName);
+                    File.Move(tempFileName, originalFileName);
+                }
+                finally { EndBusy(); }
             }
         }
 
@@ -677,6 +807,7 @@ namespace SimCityPak
                     instanceId = viewEditKey.InstanceId;
                 }
                 DatabaseIndex createdIndex = null;
+                using (Busy("Importing resource…"))
                 using (FileStream stream = fi.OpenRead())
                 {
                     byte[] data = new byte[stream.Length];
@@ -759,6 +890,7 @@ namespace SimCityPak
         {
             if (Properties.Settings.Default.LocaleFile != string.Empty)
             {
+                using (Busy("Loading instance names…"))
                 try
                 {
                     Dictionary<uint, string> itemNames = new Dictionary<uint, string>();
@@ -880,6 +1012,7 @@ namespace SimCityPak
             dlg.Filter = "Package Files|*.package";
             dlg.DefaultExt = "package";
             if (dlg.ShowDialog().GetValueOrDefault(false))
+            using (Busy("Saving package…"))
             {
                 List<DatabaseIndex> indices = new List<DatabaseIndex>();
                 foreach (var selectedItem in dataGridInstances.SelectedItems)

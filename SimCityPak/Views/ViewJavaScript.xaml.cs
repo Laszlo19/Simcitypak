@@ -79,6 +79,7 @@ namespace SimCityPak
             System.Windows.Forms.SaveFileDialog saveDialog = new System.Windows.Forms.SaveFileDialog();
             saveDialog.ShowDialog();
             if (saveDialog.FileName != null && saveDialog.FileName != "")
+            using (SimCityPak.MainWindow.Busy("Exporting script…"))
             {
                 File.WriteAllText(saveDialog.FileName, textBoxJavaScript.Text);
             }

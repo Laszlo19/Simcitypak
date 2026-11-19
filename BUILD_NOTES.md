@@ -13,9 +13,17 @@ Output: `SimCityPak\bin\Release\SimCityPak.exe` (x86, Release). It launches and 
    Framework 4.0 Redistributable** (`xnafx40_redist.msi`) and copying its DLLs into
    `References\Xna\x86\`. (Done via `msiexec /a` administrative extract — no system install.)
 
-3. **.NET 4.0 retarget** — only the v4.8 targeting pack is installed, so build with
-   `/p:TargetFrameworkVersion=v4.8`. Also `/p:TargetFrameworkProfile=` (empty) to drop the
-   discontinued Client Profile. 4.x is in-place/back-compatible, so behavior is unchanged.
+3. **.NET 4.0 → 4.8 retarget** — the v4.0 targeting pack is discontinued (Visual Studio shows
+   "Target framework not supported" and fails to load a v4.0 project). All three projects now
+   target **v4.8 in-file** — `SimCityPak.csproj`, `SimCityPak.Packages.csproj`, and (fixed
+   2026-11-19) `nQuant.Core.csproj` (its active + legacy configs all moved v4.0/v3.5 → v4.8).
+   So the solution now **opens in Visual Studio without the retarget prompt**, and nQuant.Core
+   no longer "load fails" (which otherwise cascades into `CS0006: nQuant.Core.dll not found` in
+   SimCityPak). The CLI build still passes `/p:TargetFrameworkVersion=v4.8`
+   `/p:TargetFrameworkProfile=` (drops the discontinued Client Profile) — now redundant with the
+   in-file target but harmless. 4.x is in-place/back-compatible, so behavior is unchanged.
+   (nQuant.Core's output folder is still literally named `bin\v4.0\...` — just a folder name;
+   the DLL inside is compiled as 4.8.)
 
 4. **OutputPath fallback** in `nQuant.Core.csproj` and `SimCityPak.Packages.csproj` — they
    only defined `OutputPath` for `AnyCPU`, so the `x86` platform (propagated from SimCityPak

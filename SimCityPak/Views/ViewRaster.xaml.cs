@@ -98,6 +98,7 @@ namespace SimCityPak
             dlg.Filter = "DDS|*.dds";
             //needs to be an 8.8.8.8 ARGB texture
             if (dlg.ShowDialog().GetValueOrDefault(false))
+            using (MainWindow.Busy("Importing DDS…"))
             {
                 DatabaseIndexData index = (DatabaseIndexData)this.DataContext;
 
@@ -179,6 +180,7 @@ namespace SimCityPak
             dlg.Filter = "PNG|*.png";
             dlg.FileName = MainWindow.SelectedExportName;   // localized name of the selected resource
             if (dlg.ShowDialog().GetValueOrDefault(false))
+            using (MainWindow.Busy("Exporting PNG…"))
             {
                 if(RasterImage != null)
                 {
