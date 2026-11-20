@@ -140,47 +140,52 @@ namespace SimCityPak
                             meshMain.TriangleIndices.Add((int)t.k);
                         }
 
-                        // Colour/texture the preview. Resolve against the loaded packages PLUS the
-                        // sibling .package files on disk (cached), so a mod whose textures live in
-                        // the base packages still resolves. (a) Facade buildings index a slot-4 tint
-                        // palette by vertex COLOR — WPF has no shaders, so we use the palette as the
-                        // texture and the palette coordinate (COLOR.r = column, COLOR.g = material
-                        // row) as the UV; (b) other models get their real resolved diffuse.
+                        // Colour/texture the preview. Facade buildings index a slot-4 tint palette by
+                        // vertex COLOR (WPF has no shaders, so the palette IS the texture and the
+                        // palette coordinate is the UV); other models use their resolved diffuse.
+                        // CRITICAL: a textured WPF mesh renders NOTHING unless
+                        // TextureCoordinates.Count == Positions.Count, so we always start from a solid
+                        // grey (always renderable) and only swap in a texture when the UVs are
+                        // guaranteed to match.
+                        matDiffuseMain.Brush = new SolidColorBrush(Colors.LightGray);
                         try
                         {
                             var texDirs = SimCityPak.PackageReader.DatabaseManager.Instance.PackageFiles
                                 .Where(p => p != null && p.packageFileInfo != null && p.packageFileInfo.Directory != null)
                                 .Select(p => p.packageFileInfo.Directory.FullName).Distinct().ToList();
                             var indices = SimCityPak.PackageReader.DatabaseManager.Instance.Indices;
+                            int vCount = meshMain.Positions.Count;
 
                             int pw, ph;
                             byte[] palRgba = Cli.CliRunner.GetFacadePaletteRgba(mesh, indices, texDirs, out pw, out ph);
                             if (palRgba != null && pw > 0 && ph > 0)
                             {
-                                var palBmp = new WriteableBitmap(pw, ph, 96, 96, PixelFormats.Bgra32, null);
-                                byte[] bgra = new byte[pw * ph * 4];
-                                for (int i = 0; i < pw * ph; i++)
-                                {
-                                    bgra[i * 4]     = palRgba[i * 4 + 2]; // B
-                                    bgra[i * 4 + 1] = palRgba[i * 4 + 1]; // G
-                                    bgra[i * 4 + 2] = palRgba[i * 4];     // R
-                                    bgra[i * 4 + 3] = 255;
-                                }
-                                palBmp.WritePixels(new Int32Rect(0, 0, pw, ph), bgra, pw * 4, 0);
-                                palBmp.Freeze();
-                                meshMain.TextureCoordinates.Clear();
-                                foreach (var vtx in mesh.vertices.vertices)
+                                // UVs = each vertex's palette coordinate, indexed to the actual
+                                // position count (the mesh-build loop can stop early on odd vertices,
+                                // so iterate by position index to stay 1:1 with Positions).
+                                var verts = mesh.vertices.vertices;
+                                var uvs = new System.Windows.Media.PointCollection(vCount);
+                                for (int vi = 0; vi < vCount && vi < verts.Length; vi++)
                                 {
                                     float cr = 0, cg = 0;
-                                    var col = vtx.VertexComponents.FirstOrDefault(c => c.Usage == D3DDECLUSAGE.D3DDECLUSAGE_COLOR) as VertexD3DColorValue;
+                                    var col = verts[vi].VertexComponents.FirstOrDefault(c => c.Usage == D3DDECLUSAGE.D3DDECLUSAGE_COLOR) as VertexD3DColorValue;
                                     if (col != null) { cr = col.R / 255f; cg = col.G / 255f; }
-                                    meshMain.TextureCoordinates.Add(new System.Windows.Point(cr, cg));
+                                    uvs.Add(new System.Windows.Point(cr, cg));
                                 }
-                                matDiffuseMain.Brush = new ImageBrush(palBmp) { Stretch = Stretch.Fill };
+                                if (uvs.Count == vCount)
+                                {
+                                    var palBmp = new WriteableBitmap(pw, ph, 96, 96, PixelFormats.Bgra32, null);
+                                    byte[] bgra = new byte[pw * ph * 4];
+                                    for (int i = 0; i < pw * ph; i++) { bgra[i * 4] = palRgba[i * 4 + 2]; bgra[i * 4 + 1] = palRgba[i * 4 + 1]; bgra[i * 4 + 2] = palRgba[i * 4]; bgra[i * 4 + 3] = 255; }
+                                    palBmp.WritePixels(new Int32Rect(0, 0, pw, ph), bgra, pw * 4, 0);
+                                    palBmp.Freeze();
+                                    meshMain.TextureCoordinates = uvs;
+                                    matDiffuseMain.Brush = new ImageBrush(palBmp) { Stretch = Stretch.Fill };
+                                }
                             }
-                            else
+                            else if (meshMain.TextureCoordinates.Count == vCount)
                             {
-                                // Non-facade model: apply its real resolved diffuse with the mesh's own UVs.
+                                // Non-facade model: real resolved diffuse with the mesh's own UVs.
                                 byte[] png = Cli.CliRunner.GetModelBaseColorPng(mesh, indices, texDirs);
                                 if (png != null)
                                 {
@@ -192,7 +197,7 @@ namespace SimCityPak
                                 }
                             }
                         }
-                        catch (Exception ex) { Logger.Exception("ViewMesh facade colour", ex); }
+                        catch (Exception ex) { Logger.Exception("ViewMesh facade colour", ex); matDiffuseMain.Brush = new SolidColorBrush(Colors.LightGray); }
                     }
                 }
                 catch (Exception ex)
