@@ -80,6 +80,10 @@ namespace SimCityPak.Cli
         // it to compare against the base-layer-only output.
         private static bool _noTopLayer = false;
 
+        // uPaletteRow base for the bake (which of slot4's 16 rows the palette lookup starts on).
+        // OpenSCP uses 0 for buildings; --bake-row N tests other rows while diagnosing wrong hues.
+        private static int _bakeRow = 0;
+
         [DllImport("kernel32.dll")]
         private static extern bool AttachConsole(int dwProcessId);
         private const int ATTACH_PARENT_PROCESS = -1;
@@ -126,6 +130,7 @@ namespace SimCityPak.Cli
             _bakeUvZw = args != null && args.Any(a => a.Equals("--bake-uvzw", StringComparison.OrdinalIgnoreCase));
             if (args != null && args.Any(a => a.Equals("--bake-no-swapgb", StringComparison.OrdinalIgnoreCase))) _bakeSwapGB = false;
             _noTopLayer = args != null && args.Any(a => a.Equals("--bake-no-top", StringComparison.OrdinalIgnoreCase));
+            _bakeRow = GetIntArg(args, "--bake-row", 0);
 
             try
             {
@@ -432,7 +437,7 @@ namespace SimCityPak.Cli
 
             var model = new RW4Model();
             using (var ms = new MemoryStream(index.GetIndexData(true))) model.Read(ms);
-            MaterialTextureReference palRef = null, maskRef = null;
+            MaterialTextureReference palRef = null, maskRef = null, slot4Ref = null;
             foreach (RW4Section s in model.Sections)
             {
                 RW4Material mat = s.obj as RW4Material;
@@ -441,9 +446,25 @@ namespace SimCityPak.Cli
                 {
                     if (mr.Unknown1 == 0 && palRef == null) palRef = mr;
                     if (mr.Unknown1 == 1 && maskRef == null) maskRef = mr;
+                    if (mr.Unknown1 == 4 && slot4Ref == null) slot4Ref = mr;
                 }
             }
             if (palRef == null || maskRef == null) { Console.WriteLine("missing palette (u1=0) or mask (u1=1) slot"); return 2; }
+
+            // Dump the real slot4 tint palette (512x16) so we can see where each colour lives.
+            if (slot4Ref != null)
+            {
+                DatabaseIndex s4idx;
+                if (lookup.TryGetValue(slot4Ref.TextureInstanceId, out s4idx))
+                {
+                    int s4w, s4h; byte[] s4 = DecodeTextureResourceRgba(s4idx, out s4w, out s4h);
+                    if (s4 != null)
+                    {
+                        File.WriteAllBytes(Path.Combine(outDir, inst.ToString("x8") + "_slot4_palette.png"), GltfConverter.RgbaToPng(s4, s4w, s4h));
+                        Console.WriteLine("slot4 palette " + s4w + "x" + s4h + " -> " + inst.ToString("x8") + "_slot4_palette.png");
+                    }
+                }
+            }
 
             // --palette <hex> overrides the palette source (e.g. the global tint atlas 0x9590d255)
             uint palInst = palRef.TextureInstanceId;
@@ -497,6 +518,18 @@ namespace SimCityPak.Cli
                 var cE = SamplePaletteBilinear(pal, pw, ph, 0.98f, (row + 0.5f) / ph);
                 Console.WriteLine(string.Format("  palette row{0}: L({1:f2},{2:f2},{3:f2}) M({4:f2},{5:f2},{6:f2}) R({7:f2},{8:f2},{9:f2})",
                     row, c0[0], c0[1], c0[2], cM[0], cM[1], cM[2], cE[0], cE[1], cE[2]));
+            }
+            // Run the ACTUAL per-texel bake path and dump its atlas, so we can see exactly what the
+            // export produced for this model (honours --bake-row / --bake-swapgb / --bake-no-top etc).
+            {
+                float[] bp, bn, bu; int bvc; byte[] batlas; bool bcut;
+                if (BakeFacadeDiffuse(mesh, lookup, out bp, out bn, out bu, out bvc, out batlas, out bcut) && batlas != null)
+                {
+                    File.WriteAllBytes(Path.Combine(outDir, tag + "_bake_atlas.png"), batlas);
+                    GltfConverter.WriteBakedFacadeGlb(Path.Combine(outDir, tag + "_bake.glb"), bp, bn, bu, bvc, batlas, bcut);
+                    Console.WriteLine("bake atlas -> " + tag + "_bake_atlas.png  +  " + tag + "_bake.glb  (verts=" + bvc + " cutout=" + bcut + ")");
+                }
+                else Console.WriteLine("BakeFacadeDiffuse returned false (not treated as a facade)");
             }
             Console.WriteLine("Output: " + Path.GetFullPath(outDir));
             return 0;
@@ -872,8 +905,9 @@ namespace SimCityPak.Cli
         }
 
         /// <summary>The slot-4 tint palette fills its unused entries with pure green (0,255,0) as a
-        /// placeholder. A vertex that indexes one would otherwise glow green, so remap those texels
-        /// to a neutral grey (they are "no tint" slots, not a real colour).</summary>
+        /// placeholder. A vertex/texel that indexes one would otherwise glow green, so remap those to
+        /// neutral grey. (Some models instead use magenta (253,0,255) placeholders, but neutralizing
+        /// those regressed the believable buildings, so this stays green-only for now.)</summary>
         private static void NeutralizeGreenPlaceholders(byte[] rgba)
         {
             if (rgba == null) return;
@@ -1142,7 +1176,7 @@ namespace SimCityPak.Cli
                             {
                                 // BASE layer: palette[palOrigin.x + mask.r/512, mask.g/16] * (mask.b*2)
                                 float palU = palOx + mR * (1f / 512f) + 1f / 1024f;
-                                float palV = mG * (1f / 16f) + 1f / 32f;
+                                float palV = (_bakeRow + mG) * (1f / 16f) + 1f / 32f;
                                 if (palU < 0f) palU = 0f; else if (palU > 1f) palU = 1f;
                                 float[] cBase = SamplePaletteBilinear(pal, pw, ph, palU, palV);
                                 float mulBase = mB * 2f;
@@ -1175,7 +1209,7 @@ namespace SimCityPak.Cli
                                         {
                                             float palUtop = palOy + fR * (1f / 512f) + 1f / 1024f;
                                             if (palUtop < 0f) palUtop = 0f; else if (palUtop > 1f) palUtop = 1f;
-                                            float palVtop = fG * (1f / 16f) + 1f / 32f;
+                                            float palVtop = (_bakeRow + fG) * (1f / 16f) + 1f / 32f;
                                             float[] cTop = SamplePaletteBilinear(pal, pw, ph, palUtop, palVtop);
                                             tr = cTop[0]; tg = cTop[1]; tb = cTop[2]; mulTop = fB * 2f;
                                         }
@@ -1345,6 +1379,21 @@ namespace SimCityPak.Cli
 
         /// <summary>Bilinear sample (clamp to edge, UV in [0,1]) of an HDR float RGBA palette,
         /// matching the GlassBox D3D9 linear sampler used by BuildingPaletteSample.</summary>
+        /// <summary>Nearest-texel palette sample. The tint palette is a discrete LUT whose real
+        /// colours are single-column spikes separated by placeholder/guard texels, so bilinear
+        /// blends a real colour with its neighbours (muddy/blue). Nearest keeps each lookup on one
+        /// authored colour.</summary>
+        private static float[] SamplePaletteNearest(float[] pal, int w, int h, float u, float v)
+        {
+            if (u < 0) u = 0; else if (u > 1) u = 1;
+            if (v < 0) v = 0; else if (v > 1) v = 1;
+            int x = (int)(u * w); if (x >= w) x = w - 1; if (x < 0) x = 0;
+            int y = (int)(v * h); if (y >= h) y = h - 1; if (y < 0) y = 0;
+            int i = (y * w + x) * 4;
+            if (i < 0 || i + 2 >= pal.Length) return new float[] { 0, 0, 0 };
+            return new float[] { pal[i], pal[i + 1], pal[i + 2] };
+        }
+
         private static float[] SamplePaletteBilinear(float[] pal, int w, int h, float u, float v)
         {
             if (u < 0) u = 0; else if (u > 1) u = 1;
@@ -1551,10 +1600,19 @@ namespace SimCityPak.Cli
                             && ((RW4Mesh)s.obj).triangles.triangles != null)
                 .ToList();
 
-            // Mark models that carry skeletal animation (Anim sections) with an "animated_" filename
-            // prefix, so animated assets are easy to spot/group in the exported folder.
+            // Mark models that ACTUALLY animate with an "animated_" filename prefix. That needs BOTH
+            // an Anim (keyframe) section AND a skinned mesh (vertices with BLENDINDICES) bound to the
+            // animated joints -- GltfConverter.ExtractSkin drops the skin when the mesh has no
+            // BLENDINDICES, so those export static (the skeleton moves but the geometry does not), and
+            // flagging them "animated" is misleading.
             bool hasAnim = model.Sections != null && model.Sections.Any(s => s != null && s.obj is Anim);
-            string animPrefix = hasAnim ? "animated_" : "";
+            bool hasSkinnedMesh = meshSections.Any(ms =>
+            {
+                var mv = ((RW4Mesh)ms.obj).vertices.vertices;
+                return mv != null && mv.Length > 0 && mv[0].VertexComponents != null
+                    && mv[0].VertexComponents.Any(c => c.Usage == D3DDECLUSAGE.D3DDECLUSAGE_BLENDINDICES);
+            });
+            string animPrefix = (hasAnim && hasSkinnedMesh) ? "animated_" : "";
 
             int written = 0;
             for (int i = 0; i < meshSections.Count; i++)
