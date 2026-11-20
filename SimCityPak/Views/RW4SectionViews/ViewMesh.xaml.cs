@@ -38,6 +38,7 @@ namespace SimCityPak
         }
 
         private BoundingBoxVisual3D _boundingBox;
+        private int _meshColorToken;   // bumped per selection so a stale background colour-resolve is ignored
 
         private void UserControl_DataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
         {
@@ -104,13 +105,14 @@ namespace SimCityPak
                             meshMain.TriangleIndices.Add((int)t.k);
                         }
 
-                        // Colour/texture the preview. Facade buildings index a slot-4 tint palette by
-                        // vertex COLOR (WPF has no shaders, so the palette IS the texture and the
-                        // palette coordinate is the UV); other models use their resolved diffuse.
-                        // CRITICAL: a textured WPF mesh renders NOTHING unless
-                        // TextureCoordinates.Count == Positions.Count, so we always start from a solid
-                        // grey (always renderable) and only swap in a texture when the UVs are
-                        // guaranteed to match.
+                        // Colour/texture the preview. WPF has no custom shaders: facade buildings index
+                        // a slot-4 tint palette by vertex COLOR (palette = texture, palette coordinate
+                        // = UV); other models use their resolved diffuse. Robustness rules: (1) the
+                        // mesh ALWAYS renders — start from solid grey and only swap in a texture when
+                        // the UVs match the position count AND are sane (facade FLOAT4 world coords are
+                        // huge and would scramble a flat texture); (2) resolving textures can scan the
+                        // game folder, so do it on a background thread and apply via the dispatcher,
+                        // leaving the grey mesh visible meanwhile.
                         matDiffuseMain.Brush = new SolidColorBrush(Colors.LightGray);
                         try
                         {
@@ -119,49 +121,63 @@ namespace SimCityPak
                                 .Select(p => p.packageFileInfo.Directory.FullName).Distinct().ToList();
                             var indices = SimCityPak.PackageReader.DatabaseManager.Instance.Indices;
                             int vCount = meshMain.Positions.Count;
+                            var meshRef = mesh;
+                            int token = ++_meshColorToken;
 
-                            int pw, ph;
-                            byte[] palRgba = Cli.CliRunner.GetFacadePaletteRgba(mesh, indices, texDirs, out pw, out ph);
-                            if (palRgba != null && pw > 0 && ph > 0)
+                            bool existingUvSane = meshMain.TextureCoordinates.Count == vCount;
+                            if (existingUvSane)
+                                foreach (var p in meshMain.TextureCoordinates)
+                                    if (Math.Abs(p.X) > 8 || Math.Abs(p.Y) > 8) { existingUvSane = false; break; }
+
+                            System.Threading.Tasks.Task.Run(() =>
                             {
-                                // UVs = each vertex's palette coordinate, indexed to the actual
-                                // position count (the mesh-build loop can stop early on odd vertices,
-                                // so iterate by position index to stay 1:1 with Positions).
-                                var verts = mesh.vertices.vertices;
-                                var uvs = new System.Windows.Media.PointCollection(vCount);
-                                for (int vi = 0; vi < vCount && vi < verts.Length; vi++)
+                                try
                                 {
-                                    float cr = 0, cg = 0;
-                                    var col = verts[vi].VertexComponents.FirstOrDefault(c => c.Usage == D3DDECLUSAGE.D3DDECLUSAGE_COLOR) as VertexD3DColorValue;
-                                    if (col != null) { cr = col.R / 255f; cg = col.G / 255f; }
-                                    uvs.Add(new System.Windows.Point(cr, cg));
+                                    int pw, ph;
+                                    byte[] palRgba = Cli.CliRunner.GetFacadePaletteRgba(meshRef, indices, texDirs, out pw, out ph);
+                                    byte[] png = (palRgba == null && existingUvSane) ? Cli.CliRunner.GetModelBaseColorPng(meshRef, indices, texDirs) : null;
+
+                                    System.Collections.Generic.List<System.Windows.Point> palUvs = null;
+                                    if (palRgba != null && pw > 0 && ph > 0)
+                                    {
+                                        palUvs = new System.Collections.Generic.List<System.Windows.Point>(vCount);
+                                        var verts = meshRef.vertices.vertices;
+                                        for (int vi = 0; vi < vCount && vi < verts.Length; vi++)
+                                        {
+                                            float cr = 0, cg = 0;
+                                            var col = verts[vi].VertexComponents.FirstOrDefault(c => c.Usage == D3DDECLUSAGE.D3DDECLUSAGE_COLOR) as VertexD3DColorValue;
+                                            if (col != null) { cr = col.R / 255f; cg = col.G / 255f; }
+                                            palUvs.Add(new System.Windows.Point(cr, cg));
+                                        }
+                                    }
+
+                                    Dispatcher.Invoke(() =>
+                                    {
+                                        if (token != _meshColorToken) return;   // a different mesh is selected now
+                                        if (palRgba != null && palUvs != null && palUvs.Count == meshMain.Positions.Count)
+                                        {
+                                            var palBmp = new WriteableBitmap(pw, ph, 96, 96, PixelFormats.Bgra32, null);
+                                            byte[] bgra = new byte[pw * ph * 4];
+                                            for (int i = 0; i < pw * ph; i++) { bgra[i * 4] = palRgba[i * 4 + 2]; bgra[i * 4 + 1] = palRgba[i * 4 + 1]; bgra[i * 4 + 2] = palRgba[i * 4]; bgra[i * 4 + 3] = 255; }
+                                            palBmp.WritePixels(new Int32Rect(0, 0, pw, ph), bgra, pw * 4, 0);
+                                            palBmp.Freeze();
+                                            meshMain.TextureCoordinates = new System.Windows.Media.PointCollection(palUvs);
+                                            matDiffuseMain.Brush = new ImageBrush(palBmp) { Stretch = Stretch.Fill };
+                                        }
+                                        else if (png != null && meshMain.TextureCoordinates.Count == meshMain.Positions.Count)
+                                        {
+                                            var bmp = new BitmapImage();
+                                            using (var ms = new MemoryStream(png))
+                                            { bmp.BeginInit(); bmp.CacheOption = BitmapCacheOption.OnLoad; bmp.StreamSource = ms; bmp.EndInit(); }
+                                            bmp.Freeze();
+                                            matDiffuseMain.Brush = new ImageBrush(bmp) { Stretch = Stretch.Fill };
+                                        }
+                                    });
                                 }
-                                if (uvs.Count == vCount)
-                                {
-                                    var palBmp = new WriteableBitmap(pw, ph, 96, 96, PixelFormats.Bgra32, null);
-                                    byte[] bgra = new byte[pw * ph * 4];
-                                    for (int i = 0; i < pw * ph; i++) { bgra[i * 4] = palRgba[i * 4 + 2]; bgra[i * 4 + 1] = palRgba[i * 4 + 1]; bgra[i * 4 + 2] = palRgba[i * 4]; bgra[i * 4 + 3] = 255; }
-                                    palBmp.WritePixels(new Int32Rect(0, 0, pw, ph), bgra, pw * 4, 0);
-                                    palBmp.Freeze();
-                                    meshMain.TextureCoordinates = uvs;
-                                    matDiffuseMain.Brush = new ImageBrush(palBmp) { Stretch = Stretch.Fill };
-                                }
-                            }
-                            else if (meshMain.TextureCoordinates.Count == vCount)
-                            {
-                                // Non-facade model: real resolved diffuse with the mesh's own UVs.
-                                byte[] png = Cli.CliRunner.GetModelBaseColorPng(mesh, indices, texDirs);
-                                if (png != null)
-                                {
-                                    var bmp = new BitmapImage();
-                                    using (var ms = new MemoryStream(png))
-                                    { bmp.BeginInit(); bmp.CacheOption = BitmapCacheOption.OnLoad; bmp.StreamSource = ms; bmp.EndInit(); }
-                                    bmp.Freeze();
-                                    matDiffuseMain.Brush = new ImageBrush(bmp) { Stretch = Stretch.Fill };
-                                }
-                            }
+                                catch (Exception ex) { Logger.Exception("ViewMesh colour worker", ex); }
+                            });
                         }
-                        catch (Exception ex) { Logger.Exception("ViewMesh facade colour", ex); matDiffuseMain.Brush = new SolidColorBrush(Colors.LightGray); }
+                        catch (Exception ex) { Logger.Exception("ViewMesh facade colour", ex); }
                     }
                 }
                 catch (Exception ex)
