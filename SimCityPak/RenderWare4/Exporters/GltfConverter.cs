@@ -661,6 +661,90 @@ namespace SporeMaster.RenderWare4
             }
         }
 
+        /// <summary>Writes a static glTF for a PRE-BAKED facade: an expanded "triangle soup"
+        /// (vCount = 3*triangleCount, indices sequential) with POSITION/NORMAL/TEXCOORD_0 pointing
+        /// into a single baked base-colour atlas (<paramref name="baseColorPng"/>). No skin, no
+        /// COLOR_0 — the colour is already in the texture. When <paramref name="cutout"/> the
+        /// material uses alphaMode MASK so window openings / culled faces drop out.</summary>
+        public static void WriteBakedFacadeGlb(string fileName, float[] pos, float[] norm, float[] uv, int vCount, byte[] baseColorPng, bool cutout)
+        {
+            using (var bin = new MemoryStream())
+            using (var bw = new BinaryWriter(bin))
+            {
+                float[] min = { float.MaxValue, float.MaxValue, float.MaxValue };
+                float[] max = { float.MinValue, float.MinValue, float.MinValue };
+                for (int i = 0; i < vCount; i++)
+                {
+                    float x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2];
+                    bw.Write(x); bw.Write(y); bw.Write(z);
+                    if (x < min[0]) min[0] = x; if (y < min[1]) min[1] = y; if (z < min[2]) min[2] = z;
+                    if (x > max[0]) max[0] = x; if (y > max[1]) max[1] = y; if (z > max[2]) max[2] = z;
+                }
+                int posOffset = 0, posLen = vCount * 12;
+                int normOffset = (int)bin.Position;
+                for (int i = 0; i < vCount; i++) { bw.Write(norm[i * 3]); bw.Write(norm[i * 3 + 1]); bw.Write(norm[i * 3 + 2]); }
+                int normLen = vCount * 12;
+                int uvOffset = (int)bin.Position;
+                for (int i = 0; i < vCount; i++) { bw.Write(uv[i * 2]); bw.Write(uv[i * 2 + 1]); }
+                int uvLen = vCount * 8;
+                int idxOffset = (int)bin.Position;
+                for (int i = 0; i < vCount; i++) bw.Write((uint)i);
+                int idxLen = vCount * 4;
+                Pad4(bw, bin);
+                int imgOffset = (int)bin.Position;
+                bw.Write(baseColorPng);
+                int imgLen = baseColorPng.Length;
+                bw.Flush();
+                byte[] binData = bin.ToArray();
+
+                var bufferViews = new List<object>
+                {
+                    new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = posOffset,  ["byteLength"] = posLen,  ["target"] = TARGET_ARRAY },
+                    new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = normOffset, ["byteLength"] = normLen, ["target"] = TARGET_ARRAY },
+                    new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = uvOffset,   ["byteLength"] = uvLen,   ["target"] = TARGET_ARRAY },
+                    new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = idxOffset,  ["byteLength"] = idxLen,  ["target"] = TARGET_ELEMENT },
+                    new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = imgOffset,  ["byteLength"] = imgLen }
+                };
+                var accessors = new List<object>
+                {
+                    new Dictionary<string, object> { ["bufferView"] = 0, ["componentType"] = COMP_FLOAT, ["count"] = vCount, ["type"] = "VEC3", ["min"] = new object[] { min[0], min[1], min[2] }, ["max"] = new object[] { max[0], max[1], max[2] } },
+                    new Dictionary<string, object> { ["bufferView"] = 1, ["componentType"] = COMP_FLOAT, ["count"] = vCount, ["type"] = "VEC3" },
+                    new Dictionary<string, object> { ["bufferView"] = 2, ["componentType"] = COMP_FLOAT, ["count"] = vCount, ["type"] = "VEC2" },
+                    new Dictionary<string, object> { ["bufferView"] = 3, ["componentType"] = COMP_UINT,  ["count"] = vCount, ["type"] = "SCALAR" }
+                };
+                var material = new Dictionary<string, object>
+                {
+                    ["pbrMetallicRoughness"] = new Dictionary<string, object>
+                    {
+                        ["baseColorTexture"] = new Dictionary<string, object> { ["index"] = 0 },
+                        ["metallicFactor"] = 0.0, ["roughnessFactor"] = 1.0
+                    },
+                    ["name"] = "facade_baked"
+                };
+                if (cutout) { material["alphaMode"] = "MASK"; material["alphaCutoff"] = 0.5; material["doubleSided"] = true; }
+                object[] upRotation = new object[] { -0.70710678, 0.0, 0.0, 0.70710678 };
+                var root = new Dictionary<string, object>
+                {
+                    ["asset"] = new Dictionary<string, object> { ["version"] = "2.0", ["generator"] = "SimCityPak facade bake" },
+                    ["scene"] = 0,
+                    ["scenes"] = new object[] { new Dictionary<string, object> { ["nodes"] = new object[] { 0 } } },
+                    ["nodes"] = new object[] { new Dictionary<string, object> { ["rotation"] = upRotation, ["mesh"] = 0 } },
+                    ["meshes"] = new object[] { new Dictionary<string, object> {
+                        ["primitives"] = new object[] { new Dictionary<string, object> {
+                            ["attributes"] = new Dictionary<string, object> { ["POSITION"] = 0, ["NORMAL"] = 1, ["TEXCOORD_0"] = 2 },
+                            ["indices"] = 3, ["mode"] = MODE_TRIANGLES, ["material"] = 0 } } } },
+                    ["materials"] = new object[] { material },
+                    ["textures"] = new object[] { new Dictionary<string, object> { ["sampler"] = 0, ["source"] = 0 } },
+                    ["images"] = new object[] { new Dictionary<string, object> { ["bufferView"] = 4, ["mimeType"] = "image/png" } },
+                    ["samplers"] = new object[] { new Dictionary<string, object> { ["magFilter"] = 9729, ["minFilter"] = 9987, ["wrapS"] = 33071, ["wrapT"] = 33071 } },
+                    ["bufferViews"] = bufferViews,
+                    ["accessors"] = accessors,
+                    ["buffers"] = new object[] { new Dictionary<string, object> { ["byteLength"] = binData.Length } }
+                };
+                WriteGlb(fileName, JsonConvert.SerializeObject(root), binData);
+            }
+        }
+
         // ----- texture decode -----------------------------------------------
 
         /// <summary>

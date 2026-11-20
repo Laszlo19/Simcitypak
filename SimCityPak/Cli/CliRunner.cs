@@ -57,6 +57,25 @@ namespace SimCityPak.Cli
         // keep the greyscale facade. Enable the experiment with --facade-color.
         private static bool _facadeColorExperimental = false;
 
+        // The per-texel facade diffuse bake (BakeFacadeDiffuse) is on by default for export-gltf /
+        // export-all; --no-facade-bake disables it to fall back to the per-vertex palette colour.
+        private static bool _noFacadeBake = false;
+
+        // Debug: 0 = normal composite; 1 = write the sampled slot1 mask.rgb; 2 = write sampled
+        // mask.b (brightness) as grey. Set via --bake-debug N. Used to diagnose the tUv mapping.
+        private static int _bakeDebug = 0;
+
+        // Optional tUv tweaks for diagnosing the facade UV mapping: --bake-flipv flips V,
+        // --bake-uvzw uses TEXCOORD0.zw instead of .xy.
+        private static bool _bakeFlipV = false;
+        private static bool _bakeUvZw = false;
+        // The pf21 mask decode permutes G/B relative to the building4 shader's convention
+        // (.g = palette sub-row, .b = brightness): the decoded .g is actually the brightness and the
+        // decoded .b the sub-row. Verified on the Berlin TV Tower — swapping makes the dominant wall
+        // tile (127,255,0) render as bright concrete instead of black. On by default;
+        // --bake-no-swapgb disables it for diagnostics.
+        private static bool _bakeSwapGB = true;
+
         [DllImport("kernel32.dll")]
         private static extern bool AttachConsole(int dwProcessId);
         private const int ATTACH_PARENT_PROCESS = -1;
@@ -97,6 +116,11 @@ namespace SimCityPak.Cli
             Logger.Info("CLI: " + string.Join(" ", args));
             _facadeVariation = GetIntArg(args, "--variation", 0);
             _facadeColorExperimental = args != null && args.Any(a => a.Equals("--facade-color", StringComparison.OrdinalIgnoreCase));
+            _noFacadeBake = args != null && args.Any(a => a.Equals("--no-facade-bake", StringComparison.OrdinalIgnoreCase));
+            _bakeDebug = GetIntArg(args, "--bake-debug", 0);
+            _bakeFlipV = args != null && args.Any(a => a.Equals("--bake-flipv", StringComparison.OrdinalIgnoreCase));
+            _bakeUvZw = args != null && args.Any(a => a.Equals("--bake-uvzw", StringComparison.OrdinalIgnoreCase));
+            if (args != null && args.Any(a => a.Equals("--bake-no-swapgb", StringComparison.OrdinalIgnoreCase))) _bakeSwapGB = false;
 
             try
             {
@@ -107,7 +131,7 @@ namespace SimCityPak.Cli
                     case "export-gltf":
                     {
                         var texLookup = BuildTextureLookupForInput(args.Length > 1 ? args[1] : "", args);
-                        return RunExportModels(args, ".glb", (m, p) => new GltfConverter(mesh => ResolveTextures(mesh, texLookup), mesh => ResolvePerVertexColor(mesh, texLookup)).Export(m, p));
+                        return RunExportModels(args, ".glb", (m, p) => ExportGltfModel(m, p, texLookup));
                     }
                     case "export-texture":
                         return RunExportTextures(args);
@@ -691,6 +715,21 @@ namespace SimCityPak.Cli
             catch (Exception ex) { Logger.Exception("GetModelBaseColorPng", ex); return null; }
         }
 
+        /// <summary>Exports one mesh to .glb. Facade buildings (slot0 param table + slot1 mask +
+        /// slot4 palette present) get the per-texel diffuse bake; everything else falls back to the
+        /// standard export (real textures where available, else per-vertex palette colour).</summary>
+        private static void ExportGltfModel(RW4Mesh m, string path, Dictionary<uint, DatabaseIndex> texLookup)
+        {
+            float[] pos, norm, uv; int vc; byte[] atlas; bool cut;
+            if (!_noFacadeBake && BakeFacadeDiffuse(m, texLookup, out pos, out norm, out uv, out vc, out atlas, out cut)
+                && atlas != null && vc > 0)
+            {
+                GltfConverter.WriteBakedFacadeGlb(path, pos, norm, uv, vc, atlas, cut);
+                return;
+            }
+            new GltfConverter(mesh => ResolveTextures(mesh, texLookup), mesh => ResolvePerVertexColor(mesh, texLookup)).Export(m, path);
+        }
+
         private static GltfConverter.MaterialTextures ResolveTextures(RW4Mesh mesh, Dictionary<uint, DatabaseIndex> lookup)
         {
             try
@@ -922,6 +961,224 @@ namespace SimCityPak.Cli
                 return outp;
             }
             catch (Exception ex) { Logger.Exception("ResolvePerVertexColor", ex); return null; }
+        }
+
+        private static float Frac(float x) { return x - (float)Math.Floor(x); }
+
+        /// <summary>Nearest-texel RGBA sample with wrap (GL_REPEAT). u,v may be any real.</summary>
+        private static void SampleRgbaWrap(byte[] rgba, int w, int h, float u, float v, out float r, out float g, out float b, out byte a)
+        {
+            r = g = b = 0; a = 255;
+            if (rgba == null || w <= 0 || h <= 0) return;
+            u = Frac(u); v = Frac(v);
+            int x = (int)(u * w); if (x >= w) x = w - 1; if (x < 0) x = 0;
+            int y = (int)(v * h); if (y >= h) y = h - 1; if (y < 0) y = 0;
+            int i = (y * w + x) * 4;
+            if (i < 0 || i + 3 >= rgba.Length) return;
+            r = rgba[i] / 255f; g = rgba[i + 1] / 255f; b = rgba[i + 2] / 255f; a = rgba[i + 3];
+        }
+
+        /// <summary>Per-TEXEL facade diffuse bake (the real "bake the diffuse").  Rasterizes every
+        /// triangle into its own cell of an output atlas and evaluates OpenSCP's building4 BASE-LAYER
+        /// composite per output texel — so the facade UV's per-pixel tiling (frac) is reproduced
+        /// faithfully, unlike the per-vertex approximation which collapsed it and went black.
+        ///   tUv   = frac(vTintUv) * regionXform.xy + regionXform.zw   (vTintUv = TEXCOORD0.xy;
+        ///           regionXform = slot0 param-table row1 at the material column = D3DCOLOR.G)
+        ///   mask  = slot1[tUv];  palU = palOrigin.x + mask.r/512;  palV = mask.g/16  (uPaletteRow 0)
+        ///   albedo= slot4[palU, palV] * (mask.b * 2);  mask.a &lt; 0.5 -&gt; cutout (hole)
+        /// Returns false (caller falls back to the vertex-colour export) when the mesh is not a
+        /// facade (missing slot0 param table, slot1 mask, or slot4 palette).</summary>
+        private static bool BakeFacadeDiffuse(RW4Mesh mesh, Dictionary<uint, DatabaseIndex> lookup,
+            out float[] outPos, out float[] outNorm, out float[] outUv, out int outVCount, out byte[] atlasPng, out bool cutout)
+        {
+            outPos = null; outNorm = null; outUv = null; outVCount = 0; atlasPng = null; cutout = false;
+            try
+            {
+                if (lookup == null || mesh == null || mesh.model == null || mesh.vertices == null
+                    || mesh.vertices.vertices == null || mesh.triangles == null || mesh.triangles.triangles == null)
+                    return false;
+
+                float[] prm = null; int prw = 0, prh = 0;   // slot0 param table (float Wx4)
+                byte[] mask = null; int mw = 0, mh = 0;     // slot1 colour-control mask
+                float[] pal = null; int pw = 0, ph = 0;     // slot4 tint palette
+                foreach (RW4Section s in mesh.model.Sections)
+                {
+                    RW4Material mat = s.obj as RW4Material;
+                    if (mat == null || mat.Materials == null) continue;
+                    foreach (var mr in mat.Materials)
+                    {
+                        if (mr.TextureInstanceId == 0) continue;
+                        DatabaseIndex tdi;
+                        if (!lookup.TryGetValue(mr.TextureInstanceId, out tdi)) continue;
+                        if (mr.Unknown1 == 0 && prm == null) prm = DecodePaletteFloatRgba(tdi, out prw, out prh);
+                        else if (mr.Unknown1 == 1 && mask == null) mask = DecodeTextureResourceRgba(tdi, out mw, out mh);
+                        else if (mr.Unknown1 == 4 && pal == null)
+                        {
+                            int bw2, bh2; byte[] rgba = DecodeTextureResourceRgba(tdi, out bw2, out bh2);
+                            if (rgba != null) { NeutralizeGreenPlaceholders(rgba); pw = bw2; ph = bh2; pal = new float[pw * ph * 4]; for (int i = 0; i < pal.Length; i++) pal[i] = rgba[i] / 255f; }
+                        }
+                    }
+                    if (prm != null && mask != null && pal != null) break;
+                }
+                if (prm == null || prw <= 0 || mask == null || mw <= 0 || pal == null) return false;
+
+                var verts = mesh.vertices.vertices;
+                int n = verts.Length;
+                int[] vcol = new int[n]; float[] vtu = new float[n], vtv = new float[n];
+                float[] vpx = new float[n], vpy = new float[n], vpz = new float[n];
+                float[] vnx = new float[n], vny = new float[n], vnz = new float[n];
+                for (int i = 0; i < n; i++)
+                {
+                    var v = verts[i];
+                    var p = v.Position; vpx[i] = p.X; vpy[i] = p.Y; vpz[i] = p.Z;
+                    var nn = v.Normal; vnx[i] = nn.X; vny[i] = nn.Y; vnz[i] = nn.Z;
+                    int cg = 0; float uvX = 0, uvY = 0;
+                    if (v.VertexComponents != null)
+                        foreach (var comp in v.VertexComponents)
+                        {
+                            if (comp.Usage == D3DDECLUSAGE.D3DDECLUSAGE_COLOR)
+                            {
+                                var col = comp as VertexD3DColorValue; if (col != null) cg = col.G;
+                            }
+                            else if (comp.Usage == D3DDECLUSAGE.D3DDECLUSAGE_TEXCOORD)
+                            {
+                                var f4 = comp as VertexFloat4Value; var f2 = comp as VertexFloat2Value;
+                                if (f4 != null) { if (_bakeUvZw) { uvX = f4.Z; uvY = f4.W; } else { uvX = f4.X; uvY = f4.Y; } }
+                                else if (f2 != null) { uvX = f2.X; uvY = f2.Y; }
+                            }
+                        }
+                    vcol[i] = cg; vtu[i] = uvX; vtv[i] = _bakeFlipV ? (1f - uvY) : uvY;
+                }
+
+                var tl = new List<int>();
+                foreach (Triangle t in mesh.triangles.triangles)
+                {
+                    int ti0 = (int)t.i, tj0 = (int)t.j, tk0 = (int)t.k;
+                    if (ti0 == tj0 || tj0 == tk0 || ti0 == tk0) continue;
+                    if (ti0 < 0 || tj0 < 0 || tk0 < 0 || ti0 >= n || tj0 >= n || tk0 >= n) continue;
+                    tl.Add(ti0); tl.Add(tj0); tl.Add(tk0);
+                }
+                int T = tl.Count / 3;
+                if (T == 0) return false;
+
+                // Atlas: 2 triangles per square cell (split on the diagonal).
+                int cells = (T + 1) / 2;
+                int gridN = (int)Math.Ceiling(Math.Sqrt(cells)); if (gridN < 1) gridN = 1;
+                int cellPx = 2048 / gridN; if (cellPx > 32) cellPx = 32; if (cellPx < 6) cellPx = 6;
+                int atlas = gridN * cellPx;
+                if (atlas > 4096) { cellPx = Math.Max(4, 4096 / gridN); atlas = gridN * cellPx; }
+                int gut = cellPx >= 12 ? 1 : 0;
+
+                byte[] img = new byte[atlas * atlas * 4];
+                bool[] cov = new bool[atlas * atlas];
+                int vCount = T * 3;
+                float[] pos = new float[vCount * 3], nrm = new float[vCount * 3], uvs = new float[vCount * 2];
+                bool anyCut = false;
+
+                for (int ti = 0; ti < T; ti++)
+                {
+                    int ia = tl[ti * 3], ib = tl[ti * 3 + 1], ic = tl[ti * 3 + 2];
+                    int cell = ti / 2, half = ti % 2;
+                    int cx = (cell % gridN) * cellPx, cy = (cell / gridN) * cellPx;
+                    float x0 = cx + gut, y0 = cy + gut, x1 = cx + cellPx - gut, y1 = cy + cellPx - gut;
+                    float[] ax, ay;
+                    if (half == 0) { ax = new[] { x0, x1, x0 }; ay = new[] { y0, y0, y1 }; }
+                    else           { ax = new[] { x1, x1, x0 }; ay = new[] { y0, y1, y1 }; }
+                    int[] idx = { ia, ib, ic };
+                    for (int k = 0; k < 3; k++)
+                    {
+                        int o = (ti * 3 + k);
+                        pos[o * 3] = vpx[idx[k]]; pos[o * 3 + 1] = vpy[idx[k]]; pos[o * 3 + 2] = vpz[idx[k]];
+                        nrm[o * 3] = vnx[idx[k]]; nrm[o * 3 + 1] = vny[idx[k]]; nrm[o * 3 + 2] = vnz[idx[k]];
+                        uvs[o * 2] = ax[k] / atlas; uvs[o * 2 + 1] = ay[k] / atlas;
+                    }
+                    // rasterize into the cell
+                    float X0 = ax[0], Y0 = ay[0], X1 = ax[1], Y1 = ay[1], X2 = ax[2], Y2 = ay[2];
+                    float denom = (Y1 - Y2) * (X0 - X2) + (X2 - X1) * (Y0 - Y2);
+                    if (Math.Abs(denom) < 1e-6f) continue;
+                    int bx0 = (int)Math.Floor(Math.Min(X0, Math.Min(X1, X2))), bx1 = (int)Math.Ceiling(Math.Max(X0, Math.Max(X1, X2)));
+                    int by0 = (int)Math.Floor(Math.Min(Y0, Math.Min(Y1, Y2))), by1 = (int)Math.Ceiling(Math.Max(Y0, Math.Max(Y1, Y2)));
+                    if (bx0 < 0) bx0 = 0; if (by0 < 0) by0 = 0; if (bx1 > atlas) bx1 = atlas; if (by1 > atlas) by1 = atlas;
+                    for (int py = by0; py < by1; py++)
+                        for (int px = bx0; px < bx1; px++)
+                        {
+                            float fx = px + 0.5f, fy = py + 0.5f;
+                            float a = ((Y1 - Y2) * (fx - X2) + (X2 - X1) * (fy - Y2)) / denom;
+                            float b = ((Y2 - Y0) * (fx - X2) + (X0 - X2) * (fy - Y2)) / denom;
+                            float c = 1f - a - b;
+                            if (a < -0.01f || b < -0.01f || c < -0.01f) continue;
+                            float tu = a * vtu[ia] + b * vtu[ib] + c * vtu[ic];
+                            float tv = a * vtv[ia] + b * vtv[ib] + c * vtv[ic];
+                            int col = (a >= b && a >= c) ? vcol[ia] : (b >= c ? vcol[ib] : vcol[ic]);
+                            if (col >= prw) col = prw - 1; if (col < 0) col = 0;
+                            float palOx = prm[col * 4];
+                            float xfX = prm[(prw + col) * 4 + 0], xfY = prm[(prw + col) * 4 + 1];
+                            float xfZ = prm[(prw + col) * 4 + 2], xfW = prm[(prw + col) * 4 + 3];
+                            float mu = Frac(tu) * xfX + xfZ, mv = Frac(tv) * xfY + xfW;
+                            float mR, mG, mB; byte mA; SampleRgbaWrap(mask, mw, mh, mu, mv, out mR, out mG, out mB, out mA);
+                            if (_bakeSwapGB) { float tmp = mG; mG = mB; mB = tmp; }
+                            int oi = (py * atlas + px) * 4;
+                            if (_bakeDebug == 1)       // raw sampled mask RGB
+                            {
+                                img[oi] = ToByteClamp(mR); img[oi + 1] = ToByteClamp(mG); img[oi + 2] = ToByteClamp(mB); img[oi + 3] = 255;
+                            }
+                            else if (_bakeDebug == 2)  // sampled brightness (mask.b*2) as grey
+                            {
+                                byte gg = ToByteClamp(mB * 2f); img[oi] = gg; img[oi + 1] = gg; img[oi + 2] = gg; img[oi + 3] = 255;
+                            }
+                            else
+                            {
+                                float palU = palOx + mR * (1f / 512f) + 1f / 1024f;
+                                float palV = mG * (1f / 16f) + 1f / 32f;
+                                if (palU < 0f) palU = 0f; else if (palU > 1f) palU = 1f;
+                                float[] cc = SamplePaletteBilinear(pal, pw, ph, palU, palV);
+                                float mul = mB * 2f;
+                                img[oi] = ToByteClamp(cc[0] * mul); img[oi + 1] = ToByteClamp(cc[1] * mul); img[oi + 2] = ToByteClamp(cc[2] * mul);
+                                if (mA < 128) { img[oi + 3] = 0; anyCut = true; } else { img[oi + 3] = 255; }
+                            }
+                            cov[py * atlas + px] = true;
+                        }
+                }
+
+                DilateAtlas(img, cov, atlas, atlas, 2);
+                atlasPng = GltfConverter.RgbaToPng(img, atlas, atlas);
+                outPos = pos; outNorm = nrm; outUv = uvs; outVCount = vCount; cutout = anyCut;
+                return true;
+            }
+            catch (Exception ex) { Logger.Exception("BakeFacadeDiffuse", ex); return false; }
+        }
+
+        /// <summary>Bleeds covered texels into their uncovered neighbours (gutters between atlas
+        /// cells) so bilinear filtering at UV-island edges doesn't pick up black. Gutter fills are
+        /// made opaque so MASK cutout only applies to genuine in-triangle holes.</summary>
+        private static void DilateAtlas(byte[] img, bool[] cov, int w, int h, int iterations)
+        {
+            for (int it = 0; it < iterations; it++)
+            {
+                bool[] newly = new bool[w * h];
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                    {
+                        int p = y * w + x;
+                        if (cov[p]) continue;
+                        int sr = 0, sg = 0, sb = 0, cnt = 0;
+                        for (int dy = -1; dy <= 1; dy++)
+                            for (int dx = -1; dx <= 1; dx++)
+                            {
+                                int nx = x + dx, ny = y + dy;
+                                if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                                int np = ny * w + nx;
+                                if (!cov[np]) continue;
+                                sr += img[np * 4]; sg += img[np * 4 + 1]; sb += img[np * 4 + 2]; cnt++;
+                            }
+                        if (cnt > 0)
+                        {
+                            img[p * 4] = (byte)(sr / cnt); img[p * 4 + 1] = (byte)(sg / cnt); img[p * 4 + 2] = (byte)(sb / cnt); img[p * 4 + 3] = 255;
+                            newly[p] = true;
+                        }
+                    }
+                for (int i = 0; i < w * h; i++) if (newly[i]) cov[i] = true;
+            }
         }
 
         /// <summary>SimCity's normal maps are "pink": flat areas ~ (255,128,128), i.e. the up
@@ -1240,12 +1497,17 @@ namespace SimCityPak.Cli
                             && ((RW4Mesh)s.obj).triangles.triangles != null)
                 .ToList();
 
+            // Mark models that carry skeletal animation (Anim sections) with an "animated_" filename
+            // prefix, so animated assets are easy to spot/group in the exported folder.
+            bool hasAnim = model.Sections != null && model.Sections.Any(s => s != null && s.obj is Anim);
+            string animPrefix = hasAnim ? "animated_" : "";
+
             int written = 0;
             for (int i = 0; i < meshSections.Count; i++)
             {
                 RW4Mesh mesh = (RW4Mesh)meshSections[i].obj;
                 string suffix = meshSections.Count > 1 ? ("_mesh" + i) : "";
-                string outPath = Path.Combine(outDir, baseName + suffix + ext);
+                string outPath = Path.Combine(outDir, animPrefix + baseName + suffix + ext);
                 exporter(mesh, outPath);
                 written++;
                 Console.WriteLine("OK   " + Path.GetFileName(outPath));
@@ -1977,7 +2239,7 @@ namespace SimCityPak.Cli
             int glb = 0, tex = 0, fails = 0;
             Action<byte[], string> handle = (data, baseName) =>
             {
-                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter(mesh => ResolveTextures(mesh, texLookup), mesh => ResolvePerVertexColor(mesh, texLookup)).Export(m, p)); }
+                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => ExportGltfModel(m, p, texLookup)); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all model " + baseName, ex); Console.WriteLine("FAIL " + baseName + " (model) :: " + ex.Message); }
                 try { tex += ExportRw4Textures(data, outDir, baseName, format); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all textures " + baseName, ex); Console.WriteLine("FAIL " + baseName + " (textures) :: " + ex.Message); }
@@ -2049,7 +2311,7 @@ namespace SimCityPak.Cli
                 byte[] data;
                 try { data = index.GetIndexData(true); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all read " + baseName, ex); continue; }
-                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => new GltfConverter(mesh => ResolveTextures(mesh, texLookup), mesh => ResolvePerVertexColor(mesh, texLookup)).Export(m, p)); }
+                try { glb += ExportRw4Bytes(data, outDir, baseName, ".glb", (m, p) => ExportGltfModel(m, p, texLookup)); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all model " + baseName, ex); }
                 try { tex += ExportRw4Textures(data, outDir, baseName, format); }
                 catch (Exception ex) { fails++; Logger.Exception("export-all textures " + baseName, ex); }
