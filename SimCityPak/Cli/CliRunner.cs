@@ -597,6 +597,34 @@ namespace SimCityPak.Cli
             }
         }
 
+        // Cached sibling-package texture lookup for the viewer, so selecting meshes doesn't rescan
+        // the game folder (~33 packages) every time. Rebuilt only when the directory set changes.
+        private static Dictionary<uint, DatabaseIndex> _siblingTexCache;
+        private static string _siblingTexCacheKey;
+
+        private static Dictionary<uint, DatabaseIndex> GetSiblingTextureLookup(IEnumerable<string> dirs)
+        {
+            if (dirs == null) return new Dictionary<uint, DatabaseIndex>();
+            string key = string.Join("|", dirs.Where(d => !string.IsNullOrEmpty(d)).Distinct().OrderBy(d => d, StringComparer.OrdinalIgnoreCase));
+            if (_siblingTexCache != null && _siblingTexCacheKey == key) return _siblingTexCache;
+            var map = new Dictionary<uint, DatabaseIndex>();
+            AddSiblingTextures(map, dirs);
+            _siblingTexCache = map; _siblingTexCacheKey = key;
+            return map;
+        }
+
+        /// <summary>Texture lookup for the viewer: the loaded resources (priority) plus the cached
+        /// sibling .package files on disk, so a mod whose textures live in the base packages still
+        /// resolves even when only the mod is open.</summary>
+        private static Dictionary<uint, DatabaseIndex> BuildViewerLookup(IEnumerable<DatabaseIndex> indices, IEnumerable<string> textureDirs)
+        {
+            var map = BuildTextureLookup(indices);
+            if (textureDirs != null)
+                foreach (var kv in GetSiblingTextureLookup(textureDirs))
+                    if (!map.ContainsKey(kv.Key)) map[kv.Key] = kv.Value;
+            return map;
+        }
+
         /// <summary>
         /// Texture lookup for a .package CLI input: the input package PLUS every other
         /// .package beside it (so textures stored in the shared graphics packages resolve).
@@ -648,6 +676,21 @@ namespace SimCityPak.Cli
         /// glTF convention (flat 128,128,255); we detect and unswizzle it, and lift its alpha
         /// into an RGB specular-colour map.
         /// </summary>
+        /// <summary>Public: the model's resolved base-colour map as PNG bytes (the same diffuse the
+        /// glTF export embeds), resolved against the given resources, or null. Used by the in-app 3D
+        /// viewer so non-facade models (landmarks, props, mods) show their real texture instead of
+        /// flat grey. Facade buildings are handled separately via <see cref="GetFacadePaletteRgba"/>.</summary>
+        public static byte[] GetModelBaseColorPng(RW4Mesh mesh, IEnumerable<DatabaseIndex> indices, IEnumerable<string> textureDirs)
+        {
+            if (mesh == null || indices == null) return null;
+            try
+            {
+                var tex = ResolveTextures(mesh, BuildViewerLookup(indices, textureDirs));
+                return tex != null ? tex.BaseColor : null;
+            }
+            catch (Exception ex) { Logger.Exception("GetModelBaseColorPng", ex); return null; }
+        }
+
         private static GltfConverter.MaterialTextures ResolveTextures(RW4Mesh mesh, Dictionary<uint, DatabaseIndex> lookup)
         {
             try
@@ -739,10 +782,11 @@ namespace SimCityPak.Cli
         /// is linear) so a PBR viewer lights them. Returns vCount*4 RGBA bytes, or null when the
         /// model has no palette (non-facade meshes keep their normal textures). Gated by
         /// --facade-color while under development.</summary>
-        /// <summary>Export path: per-vertex facade colour, gated behind --facade-color.</summary>
+        /// <summary>Export path: per-vertex facade colour. On by default now that it uses the real
+        /// slot-4 tint palette (believable colour); --facade-color additionally turns on the
+        /// experimental per-texel palette composite in ResolveTextures.</summary>
         private static byte[] ResolvePerVertexColor(RW4Mesh mesh, Dictionary<uint, DatabaseIndex> lookup)
         {
-            if (!_facadeColorExperimental) return null;
             return ComputeFacadeVertexColorsCore(mesh, lookup);
         }
 
@@ -762,11 +806,11 @@ namespace SimCityPak.Cli
         /// uses this as the diffuse texture and feeds each vertex's palette coordinate
         /// (COLOR.r = column, COLOR.g = material row) as its UV, so WPF samples the facade colour
         /// without a custom shader.</summary>
-        public static byte[] GetFacadePaletteRgba(RW4Mesh mesh, IEnumerable<DatabaseIndex> indices, out int width, out int height)
+        public static byte[] GetFacadePaletteRgba(RW4Mesh mesh, IEnumerable<DatabaseIndex> indices, IEnumerable<string> textureDirs, out int width, out int height)
         {
             width = 0; height = 0;
             if (mesh == null || mesh.model == null || indices == null) return null;
-            var lookup = BuildTextureLookup(indices);
+            var lookup = BuildViewerLookup(indices, textureDirs);
             foreach (RW4Section s in mesh.model.Sections)
             {
                 RW4Material mat = s.obj as RW4Material;
@@ -777,10 +821,23 @@ namespace SimCityPak.Cli
                     DatabaseIndex tdi;
                     if (!lookup.TryGetValue(mr.TextureInstanceId, out tdi)) continue;
                     byte[] rgba = DecodeTextureResourceRgba(tdi, out width, out height);
-                    if (rgba != null) return rgba;
+                    if (rgba != null) { NeutralizeGreenPlaceholders(rgba); return rgba; }
                 }
             }
             return null;
+        }
+
+        /// <summary>The slot-4 tint palette fills its unused entries with pure green (0,255,0) as a
+        /// placeholder. A vertex that indexes one would otherwise glow green, so remap those texels
+        /// to a neutral grey (they are "no tint" slots, not a real colour).</summary>
+        private static void NeutralizeGreenPlaceholders(byte[] rgba)
+        {
+            if (rgba == null) return;
+            for (int i = 0; i + 3 < rgba.Length; i += 4)
+            {
+                byte r = rgba[i], g = rgba[i + 1], b = rgba[i + 2];
+                if (g > 200 && r < 80 && b < 80) { rgba[i] = 150; rgba[i + 1] = 150; rgba[i + 2] = 150; }
+            }
         }
 
         private static byte[] ComputeFacadeVertexColorsCore(RW4Mesh mesh, Dictionary<uint, DatabaseIndex> lookup)
@@ -802,7 +859,7 @@ namespace SimCityPak.Cli
                         DatabaseIndex tdi;
                         if (!lookup.TryGetValue(mr.TextureInstanceId, out tdi)) continue;
                         int bw2, bh2; byte[] rgba = DecodeTextureResourceRgba(tdi, out bw2, out bh2);
-                        if (rgba != null) { pw = bw2; ph = bh2; pal = new float[pw * ph * 4]; for (int i = 0; i < pal.Length; i++) pal[i] = rgba[i] / 255f; break; }
+                        if (rgba != null) { NeutralizeGreenPlaceholders(rgba); pw = bw2; ph = bh2; pal = new float[pw * ph * 4]; for (int i = 0; i < pal.Length; i++) pal[i] = rgba[i] / 255f; break; }
                     }
                     if (pal != null) break;
                 }

@@ -140,16 +140,21 @@ namespace SimCityPak
                             meshMain.TriangleIndices.Add((int)t.k);
                         }
 
-                        // Facade colour: SimCity building meshes carry no usable texture, but their
-                        // per-vertex D3DCOLOR indexes the slot-4 tint palette. WPF Viewport3D has no
-                        // custom shaders, so show the colour by using the palette itself as the
-                        // diffuse texture and each vertex's palette coordinate (COLOR.r = column,
-                        // COLOR.g = material row) as its UV — WPF then samples the facade colour.
+                        // Colour/texture the preview. Resolve against the loaded packages PLUS the
+                        // sibling .package files on disk (cached), so a mod whose textures live in
+                        // the base packages still resolves. (a) Facade buildings index a slot-4 tint
+                        // palette by vertex COLOR — WPF has no shaders, so we use the palette as the
+                        // texture and the palette coordinate (COLOR.r = column, COLOR.g = material
+                        // row) as the UV; (b) other models get their real resolved diffuse.
                         try
                         {
+                            var texDirs = SimCityPak.PackageReader.DatabaseManager.Instance.PackageFiles
+                                .Where(p => p != null && p.packageFileInfo != null && p.packageFileInfo.Directory != null)
+                                .Select(p => p.packageFileInfo.Directory.FullName).Distinct().ToList();
+                            var indices = SimCityPak.PackageReader.DatabaseManager.Instance.Indices;
+
                             int pw, ph;
-                            byte[] palRgba = Cli.CliRunner.GetFacadePaletteRgba(mesh,
-                                SimCityPak.PackageReader.DatabaseManager.Instance.Indices, out pw, out ph);
+                            byte[] palRgba = Cli.CliRunner.GetFacadePaletteRgba(mesh, indices, texDirs, out pw, out ph);
                             if (palRgba != null && pw > 0 && ph > 0)
                             {
                                 var palBmp = new WriteableBitmap(pw, ph, 96, 96, PixelFormats.Bgra32, null);
@@ -172,6 +177,19 @@ namespace SimCityPak
                                     meshMain.TextureCoordinates.Add(new System.Windows.Point(cr, cg));
                                 }
                                 matDiffuseMain.Brush = new ImageBrush(palBmp) { Stretch = Stretch.Fill };
+                            }
+                            else
+                            {
+                                // Non-facade model: apply its real resolved diffuse with the mesh's own UVs.
+                                byte[] png = Cli.CliRunner.GetModelBaseColorPng(mesh, indices, texDirs);
+                                if (png != null)
+                                {
+                                    var bmp = new BitmapImage();
+                                    using (var ms = new MemoryStream(png))
+                                    { bmp.BeginInit(); bmp.CacheOption = BitmapCacheOption.OnLoad; bmp.StreamSource = ms; bmp.EndInit(); }
+                                    bmp.Freeze();
+                                    matDiffuseMain.Brush = new ImageBrush(bmp) { Stretch = Stretch.Fill };
+                                }
                             }
                         }
                         catch (Exception ex) { Logger.Exception("ViewMesh facade colour", ex); }
