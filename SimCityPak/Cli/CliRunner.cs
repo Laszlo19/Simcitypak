@@ -76,6 +76,10 @@ namespace SimCityPak.Cli
         // --bake-no-swapgb disables it for diagnostics.
         private static bool _bakeSwapGB = true;
 
+        // Top-layer (window-motif) blend in the facade bake is on by default; --bake-no-top disables
+        // it to compare against the base-layer-only output.
+        private static bool _noTopLayer = false;
+
         [DllImport("kernel32.dll")]
         private static extern bool AttachConsole(int dwProcessId);
         private const int ATTACH_PARENT_PROCESS = -1;
@@ -121,6 +125,7 @@ namespace SimCityPak.Cli
             _bakeFlipV = args != null && args.Any(a => a.Equals("--bake-flipv", StringComparison.OrdinalIgnoreCase));
             _bakeUvZw = args != null && args.Any(a => a.Equals("--bake-uvzw", StringComparison.OrdinalIgnoreCase));
             if (args != null && args.Any(a => a.Equals("--bake-no-swapgb", StringComparison.OrdinalIgnoreCase))) _bakeSwapGB = false;
+            _noTopLayer = args != null && args.Any(a => a.Equals("--bake-no-top", StringComparison.OrdinalIgnoreCase));
 
             try
             {
@@ -1025,6 +1030,7 @@ namespace SimCityPak.Cli
                 var verts = mesh.vertices.vertices;
                 int n = verts.Length;
                 int[] vcol = new int[n]; float[] vtu = new float[n], vtv = new float[n];
+                float[] vtu2 = new float[n], vtv2 = new float[n];   // TOP-layer facade UV (TEXCOORD0.zw)
                 float[] vpx = new float[n], vpy = new float[n], vpz = new float[n];
                 float[] vnx = new float[n], vny = new float[n], vnz = new float[n];
                 for (int i = 0; i < n; i++)
@@ -1032,7 +1038,7 @@ namespace SimCityPak.Cli
                     var v = verts[i];
                     var p = v.Position; vpx[i] = p.X; vpy[i] = p.Y; vpz[i] = p.Z;
                     var nn = v.Normal; vnx[i] = nn.X; vny[i] = nn.Y; vnz[i] = nn.Z;
-                    int cg = 0; float uvX = 0, uvY = 0;
+                    int cg = 0; float uvX = 0, uvY = 0, uvZ = 0, uvW = 0;
                     if (v.VertexComponents != null)
                         foreach (var comp in v.VertexComponents)
                         {
@@ -1043,11 +1049,17 @@ namespace SimCityPak.Cli
                             else if (comp.Usage == D3DDECLUSAGE.D3DDECLUSAGE_TEXCOORD)
                             {
                                 var f4 = comp as VertexFloat4Value; var f2 = comp as VertexFloat2Value;
-                                if (f4 != null) { if (_bakeUvZw) { uvX = f4.Z; uvY = f4.W; } else { uvX = f4.X; uvY = f4.Y; } }
-                                else if (f2 != null) { uvX = f2.X; uvY = f2.Y; }
+                                if (f4 != null)
+                                {
+                                    if (_bakeUvZw) { uvX = f4.Z; uvY = f4.W; } else { uvX = f4.X; uvY = f4.Y; }
+                                    uvZ = f4.Z; uvW = f4.W;    // top layer (uv2/uv3)
+                                }
+                                else if (f2 != null) { uvX = f2.X; uvY = f2.Y; uvZ = f2.X; uvW = f2.Y; }
                             }
                         }
-                    vcol[i] = cg; vtu[i] = uvX; vtv[i] = _bakeFlipV ? (1f - uvY) : uvY;
+                    vcol[i] = cg;
+                    vtu[i] = uvX; vtv[i] = _bakeFlipV ? (1f - uvY) : uvY;
+                    vtu2[i] = uvZ; vtv2[i] = _bakeFlipV ? (1f - uvW) : uvW;
                 }
 
                 var tl = new List<int>();
@@ -1128,12 +1140,54 @@ namespace SimCityPak.Cli
                             }
                             else
                             {
+                                // BASE layer: palette[palOrigin.x + mask.r/512, mask.g/16] * (mask.b*2)
                                 float palU = palOx + mR * (1f / 512f) + 1f / 1024f;
                                 float palV = mG * (1f / 16f) + 1f / 32f;
                                 if (palU < 0f) palU = 0f; else if (palU > 1f) palU = 1f;
-                                float[] cc = SamplePaletteBilinear(pal, pw, ph, palU, palV);
-                                float mul = mB * 2f;
-                                img[oi] = ToByteClamp(cc[0] * mul); img[oi + 1] = ToByteClamp(cc[1] * mul); img[oi + 2] = ToByteClamp(cc[2] * mul);
+                                float[] cBase = SamplePaletteBilinear(pal, pw, ph, palU, palV);
+                                float mulBase = mB * 2f;
+
+                                // TOP layer (window motifs): second UV, regionXform2 (row2) + tilePadding
+                                // (row3.xy), palette column = palOrigin.y (palU2); blended by the top
+                                // mask's alpha (facadeTintValues.a) and gated by the relief tile bounds.
+                                float scFacade = 0f, mulTop = 0f;
+                                float tr = 0, tg = 0, tb = 0;
+                                if (!_noTopLayer)
+                                {
+                                    float x2X = prm[(2 * prw + col) * 4 + 0], x2Y = prm[(2 * prw + col) * 4 + 1];
+                                    float x2Z = prm[(2 * prw + col) * 4 + 2], x2W = prm[(2 * prw + col) * 4 + 3];
+                                    if (Math.Abs(x2X) > 1e-6f && Math.Abs(x2Y) > 1e-6f)
+                                    {
+                                        float palOy = prm[col * 4 + 1];                       // palU2
+                                        float padX = prm[(3 * prw + col) * 4 + 0], padY = prm[(3 * prw + col) * 4 + 1];
+                                        float tu2 = a * vtu2[ia] + b * vtu2[ib] + c * vtu2[ic];
+                                        float tv2 = a * vtv2[ia] + b * vtv2[ib] + c * vtv2[ic];
+                                        float rsx = Frac(tu2) * (1f + padX) - padX * 0.5f;
+                                        float rsy = Frac(tv2) * (1f + padY) - padY * 0.5f;
+                                        float outside = Math.Max(-rsx, 0f) + Math.Max(-rsy, 0f) + Math.Max(rsx - 1f, 0f) + Math.Max(rsy - 1f, 0f);
+                                        float cxx = rsx < 0f ? 0f : (rsx > 1f ? 1f : rsx);
+                                        float cyy = rsy < 0f ? 0f : (rsy > 1f ? 1f : rsy);
+                                        float tuTop = cxx * x2X + x2Z, tvTop = cyy * x2Y + x2W;
+                                        float fR, fG, fB; byte fA; SampleRgbaWrap(mask, mw, mh, tuTop, tvTop, out fR, out fG, out fB, out fA);
+                                        if (_bakeSwapGB) { float tmp = fG; fG = fB; fB = tmp; }
+                                        scFacade = outside > 0f ? 0f : fA / 255f;
+                                        if (scFacade > 0f)
+                                        {
+                                            float palUtop = palOy + fR * (1f / 512f) + 1f / 1024f;
+                                            if (palUtop < 0f) palUtop = 0f; else if (palUtop > 1f) palUtop = 1f;
+                                            float palVtop = fG * (1f / 16f) + 1f / 32f;
+                                            float[] cTop = SamplePaletteBilinear(pal, pw, ph, palUtop, palVtop);
+                                            tr = cTop[0]; tg = cTop[1]; tb = cTop[2]; mulTop = fB * 2f;
+                                        }
+                                    }
+                                }
+
+                                // scPalColor = mix(base, top, scFacade); scTintMul = mix(baseB, topB, scFacade)*2
+                                float r0 = cBase[0] * (1f - scFacade) + tr * scFacade;
+                                float g0 = cBase[1] * (1f - scFacade) + tg * scFacade;
+                                float b0 = cBase[2] * (1f - scFacade) + tb * scFacade;
+                                float mul = mulBase * (1f - scFacade) + mulTop * scFacade;
+                                img[oi] = ToByteClamp(r0 * mul); img[oi + 1] = ToByteClamp(g0 * mul); img[oi + 2] = ToByteClamp(b0 * mul);
                                 if (mA < 128) { img[oi + 3] = 0; anyCut = true; } else { img[oi + 3] = 255; }
                             }
                             cov[py * atlas + px] = true;
