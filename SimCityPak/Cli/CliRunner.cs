@@ -846,47 +846,73 @@ namespace SimCityPak.Cli
             {
                 if (lookup == null || mesh == null || mesh.model == null || mesh.vertices == null || mesh.vertices.vertices == null) return null;
 
-                // The real facade colour palette is material slot u1=4 (the 512x16 "tint lookup"
-                // texture), NOT the slot-0 float strip (that is the per-material PARAMETER table).
-                float[] pal = null; int pw = 0, ph = 0;
+                // Facade colour = OpenSCP's building4 lookup, per-vertex approximation.
+                //   slot0 "params table" (float4 rows, W x 4): row 0 holds the palette UV origin
+                //           (palOrigin.x = base palette column) for each MATERIAL COLUMN;
+                //   slot4 "palette" (512x16 albedo lookup) is sampled at that column.
+                // The material column is selected per-vertex by D3DCOLOR.G (0..W-1).  Using the
+                // param table here (instead of COLOR.r) is what makes each material/region land on
+                // its OWN colour -- sampling COLOR.r collapsed every building to palette column 0
+                // (the uniform blue bug).
+                float[] prm = null; int prw = 0, prh = 0;   // slot0 param table
+                float[] pal = null; int pw = 0, ph = 0;     // slot4 palette
                 foreach (RW4Section s in mesh.model.Sections)
                 {
                     RW4Material mat = s.obj as RW4Material;
                     if (mat == null || mat.Materials == null) continue;
                     foreach (var mr in mat.Materials)
                     {
-                        if (mr.Unknown1 != 4 || mr.TextureInstanceId == 0) continue;   // slot4 = tint palette
+                        if (mr.TextureInstanceId == 0) continue;
                         DatabaseIndex tdi;
                         if (!lookup.TryGetValue(mr.TextureInstanceId, out tdi)) continue;
-                        int bw2, bh2; byte[] rgba = DecodeTextureResourceRgba(tdi, out bw2, out bh2);
-                        if (rgba != null) { NeutralizeGreenPlaceholders(rgba); pw = bw2; ph = bh2; pal = new float[pw * ph * 4]; for (int i = 0; i < pal.Length; i++) pal[i] = rgba[i] / 255f; break; }
+                        if (mr.Unknown1 == 0 && prm == null)            // slot0 = param table (float)
+                        {
+                            prm = DecodePaletteFloatRgba(tdi, out prw, out prh);
+                        }
+                        else if (mr.Unknown1 == 4 && pal == null)        // slot4 = tint palette
+                        {
+                            int bw2, bh2; byte[] rgba = DecodeTextureResourceRgba(tdi, out bw2, out bh2);
+                            if (rgba != null) { NeutralizeGreenPlaceholders(rgba); pw = bw2; ph = bh2; pal = new float[pw * ph * 4]; for (int i = 0; i < pal.Length; i++) pal[i] = rgba[i] / 255f; }
+                        }
                     }
-                    if (pal != null) break;
+                    if (pal != null && prm != null) break;
                 }
                 if (pal == null) return null;
 
-                float palV = (_facadeVariation + 0.5f) / Math.Max(ph, 1);   // centre of the variation row
+                // Palette row: buildings use row 0 (uPaletteRow = 0); add the variation offset so the
+                // --facade-variation knob still works for props/instances that use other rows.
+                float palV = (_facadeVariation + 0.5f) / Math.Max(ph, 1);
                 var verts = mesh.vertices.vertices;
                 int vCount = verts.Length;
                 byte[] outp = new byte[vCount * 4];
                 int vi = 0;
                 foreach (Vertex v in verts)
                 {
-                    float cr = 0, cg = 0;
+                    int cgByte = 0; float cr = 0;
                     if (v.VertexComponents != null)
                         foreach (var comp in v.VertexComponents)
                         {
                             if (comp.Usage != D3DDECLUSAGE.D3DDECLUSAGE_COLOR) continue;
                             var col = comp as VertexD3DColorValue;
-                            if (col != null) { cr = col.R / 255f; cg = col.G / 255f; }
+                            if (col != null) { cgByte = col.G; cr = col.R / 255f; }
                             break;
                         }
-                    const float k = 255f / 256f;
-                    // COLOR.r = palette column (palU); COLOR.g = per-material index -> palette row,
-                    // so roof/walls/trim land on different palette rows (real buildings vary this
-                    // way). Fall back to the chosen variation row when a vertex carries no index.
-                    float rowV = cg > 0.001f ? cg : palV;
-                    float[] c = SamplePaletteBilinear(pal, pw, ph, cr * k, rowV);
+
+                    // palU: from slot0 param-table row 0, column = material index (COLOR.G).
+                    float palU;
+                    if (prm != null && prw > 0)
+                    {
+                        int colx = cgByte; if (colx >= prw) colx = prw - 1; if (colx < 0) colx = 0;
+                        palU = prm[colx * 4];               // row 0, R channel = palOrigin.x
+                        if (palU < 0f) palU = 0f; else if (palU > 1f) palU = 1f;
+                    }
+                    else
+                    {
+                        // No param table -> fall back to the old COLOR.r column (better than nothing).
+                        palU = cr * (255f / 256f);
+                    }
+
+                    float[] c = SamplePaletteBilinear(pal, pw, ph, palU, palV);
                     outp[vi * 4]     = ToByteClamp(c[0]);   // slot4 is already a proper albedo
                     outp[vi * 4 + 1] = ToByteClamp(c[1]);
                     outp[vi * 4 + 2] = ToByteClamp(c[2]);
