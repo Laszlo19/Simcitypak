@@ -70,69 +70,33 @@ namespace SimCityPak
                 {
                     if (mesh != null)
                     {
-                        VertexD3DColorValue lastColorValue = null;
-
-                        //separate the mesh into 'chunks' that can be given different textures if necessary
+                        // Build positions for EVERY vertex (never throw on a missing component, or the
+                        // whole mesh aborts before triangles are added -> an empty, invisible mesh).
+                        // Normals / UVs are collected in parallel and only applied if present on all
+                        // vertices (WPF requires their count to equal the position count, or nothing
+                        // renders).
+                        var normalsTmp = new System.Collections.Generic.List<Vector3D>();
+                        var uvsTmp = new System.Collections.Generic.List<System.Windows.Point>();
+                        bool allNormals = true, allUvs = true;
                         foreach (var v in mesh.vertices.vertices)
                         {
-                            if (v.VertexComponents.Exists(vc => vc.DeclarationType == D3DDECLTYPE.D3DDECLTYPE_D3DCOLOR))
-                            {
-                                VertexD3DColorValue colorVal = v.VertexComponents.First(vc => vc.DeclarationType == D3DDECLTYPE.D3DDECLTYPE_D3DCOLOR) as VertexD3DColorValue;
-                                if (colorVal != lastColorValue)
-                                {
-                                    //create a new 'chunk'.
-                                    ModelVisual3D newChunckContainer = new ModelVisual3D();
-                                    viewPort.Children.Add(newChunckContainer);
-                                    GeometryModel3D newChunk = new GeometryModel3D();
+                            var posC = v.VertexComponents.FirstOrDefault(vc => vc.Usage == D3DDECLUSAGE.D3DDECLUSAGE_POSITION) as VertexFloat3Value;
+                            meshMain.Positions.Add(posC != null ? new Point3D(posC.X, posC.Y, posC.Z) : new Point3D());
 
-                                    //  GeometryContainer.Content.add
+                            var normalC = v.VertexComponents.FirstOrDefault(vc => vc.Usage == D3DDECLUSAGE.D3DDECLUSAGE_NORMAL);
+                            var nb = normalC as VertexUByte4Value; var nf = normalC as VertexFloat3Value;
+                            if (nb != null) normalsTmp.Add(new Vector3D((nb.X - 127.5f) / 127.5f, (nb.Y - 127.5f) / 127.5f, (nb.Z - 127.5f) / 127.5f));
+                            else if (nf != null) normalsTmp.Add(new Vector3D(nf.X, nf.Y, nf.Z));
+                            else { normalsTmp.Add(new Vector3D(0, 0, 1)); allNormals = false; }
 
-
-
-                                }
-                            }
-
-
-                            VertexFloat3Value position = v.VertexComponents.First(vc => vc.Usage == D3DDECLUSAGE.D3DDECLUSAGE_POSITION) as VertexFloat3Value;
-
-                            meshMain.Positions.Add(new Point3D(position.X, position.Y, position.Z));
-
-                            IVertexComponentValue normal = v.VertexComponents.First(vc => vc.Usage == D3DDECLUSAGE.D3DDECLUSAGE_NORMAL);
-                            if (normal != null)
-                            {
-                                if (normal is VertexUByte4Value)
-                                {
-                                    VertexUByte4Value normalValue = normal as VertexUByte4Value;
-                                    meshMain.Normals.Add(new Vector3D(
-                                         (((float)normalValue.X) - 127.5f) / 127.5f,
-                                      (((float)normalValue.Y) - 127.5f) / 127.5f,
-                                       (((float)normalValue.Z) - 127.5f) / 127.5f
-                                       ));
-                                }
-                                else if (normal is VertexFloat3Value)
-                                {
-                                    VertexFloat3Value normalValue = normal as VertexFloat3Value;
-                                    meshMain.Normals.Add(new Vector3D(normalValue.X, normalValue.Y, normalValue.Z));
-                                }
-                            }
-
-                            IVertexComponentValue textureCoordinates = v.VertexComponents.First(vc => vc.Usage == D3DDECLUSAGE.D3DDECLUSAGE_TEXCOORD);
-                            if (textureCoordinates != null)
-                            {
-                                if (textureCoordinates is VertexFloat2Value)
-                                {
-                                    VertexFloat2Value textureCoordinatesValue = textureCoordinates as VertexFloat2Value;
-                                    meshMain.TextureCoordinates.Add(new System.Windows.Point(textureCoordinatesValue.X, textureCoordinatesValue.Y));
-                                }
-                                if (textureCoordinates is VertexFloat4Value)
-                                {
-                                    VertexFloat4Value textureCoordinatesValue = textureCoordinates as VertexFloat4Value;
-                                    meshMain.TextureCoordinates.Add(new System.Windows.Point(textureCoordinatesValue.X, textureCoordinatesValue.Y));
-                                }
-
-
-                            }
+                            var tcC = v.VertexComponents.FirstOrDefault(vc => vc.Usage == D3DDECLUSAGE.D3DDECLUSAGE_TEXCOORD);
+                            var t2 = tcC as VertexFloat2Value; var t4 = tcC as VertexFloat4Value;
+                            if (t2 != null) uvsTmp.Add(new System.Windows.Point(t2.X, t2.Y));
+                            else if (t4 != null) uvsTmp.Add(new System.Windows.Point(t4.X, t4.Y));
+                            else { uvsTmp.Add(new System.Windows.Point()); allUvs = false; }
                         }
+                        if (allNormals) foreach (var n in normalsTmp) meshMain.Normals.Add(n);
+                        if (allUvs) foreach (var p in uvsTmp) meshMain.TextureCoordinates.Add(p);
                         foreach (var t in mesh.triangles.triangles)
                         {
                             meshMain.TriangleIndices.Add((int)t.i);
