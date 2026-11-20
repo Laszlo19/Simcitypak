@@ -746,6 +746,8 @@ namespace SimCityPak.Cli
                 if (!_facadeColorExperimental) return null;
                 if (lookup == null || mesh == null || mesh.model == null || mesh.vertices == null || mesh.vertices.vertices == null) return null;
 
+                // The real facade colour palette is material slot u1=4 (the 512x16 "tint lookup"
+                // texture), NOT the slot-0 float strip (that is the per-material PARAMETER table).
                 float[] pal = null; int pw = 0, ph = 0;
                 foreach (RW4Section s in mesh.model.Sections)
                 {
@@ -753,17 +755,17 @@ namespace SimCityPak.Cli
                     if (mat == null || mat.Materials == null) continue;
                     foreach (var mr in mat.Materials)
                     {
-                        if (mr.TextureInstanceId == 0) continue;
+                        if (mr.Unknown1 != 4 || mr.TextureInstanceId == 0) continue;   // slot4 = tint palette
                         DatabaseIndex tdi;
                         if (!lookup.TryGetValue(mr.TextureInstanceId, out tdi)) continue;
-                        float[] pf = DecodePaletteFloatRgba(tdi, out pw, out ph);
-                        if (pf != null) { pal = pf; break; }
+                        int bw2, bh2; byte[] rgba = DecodeTextureResourceRgba(tdi, out bw2, out bh2);
+                        if (rgba != null) { pw = bw2; ph = bh2; pal = new float[pw * ph * 4]; for (int i = 0; i < pal.Length; i++) pal[i] = rgba[i] / 255f; break; }
                     }
                     if (pal != null) break;
                 }
                 if (pal == null) return null;
 
-                float palV = _facadeVariation * (1f / 8f) + 0.25f / 8f;   // centre of the variation row
+                float palV = (_facadeVariation + 0.5f) / Math.Max(ph, 1);   // centre of the variation row
                 var verts = mesh.vertices.vertices;
                 int vCount = verts.Length;
                 byte[] outp = new byte[vCount * 4];
@@ -780,14 +782,14 @@ namespace SimCityPak.Cli
                             break;
                         }
                     const float k = 255f / 256f;
-                    float[] cB = SamplePaletteBilinear(pal, pw, ph, cr * k, palV);
-                    float[] cT = SamplePaletteBilinear(pal, pw, ph, cg * k, palV);
-                    float lumB = cB[0] * 0.3f + cB[1] * 0.59f + cB[2] * 0.11f;
-                    float lumT = cT[0] * 0.3f + cT[1] * 0.59f + cT[2] * 0.11f;
-                    float[] c = lumT >= lumB ? cT : cB;    // the lit layer carries the colour
-                    outp[vi * 4]     = ToByteClamp(c[0] * 2f);
-                    outp[vi * 4 + 1] = ToByteClamp(c[1] * 2f);
-                    outp[vi * 4 + 2] = ToByteClamp(c[2] * 2f);
+                    // COLOR.r = palette column (palU); COLOR.g = per-material index -> palette row,
+                    // so roof/walls/trim land on different palette rows (real buildings vary this
+                    // way). Fall back to the chosen variation row when a vertex carries no index.
+                    float rowV = cg > 0.001f ? cg : palV;
+                    float[] c = SamplePaletteBilinear(pal, pw, ph, cr * k, rowV);
+                    outp[vi * 4]     = ToByteClamp(c[0]);   // slot4 is already a proper albedo
+                    outp[vi * 4 + 1] = ToByteClamp(c[1]);
+                    outp[vi * 4 + 2] = ToByteClamp(c[2]);
                     outp[vi * 4 + 3] = 255;
                     vi++;
                 }
@@ -1054,7 +1056,17 @@ namespace SimCityPak.Cli
             using (var ms = new MemoryStream(data)) model.Read(ms);
             var texSec = model.Sections.FirstOrDefault(x => x.TypeCode == SectionTypeCodes.Texture && x.obj is Texture);
             if (texSec == null) return null;
-            using (var bmp = GltfConverter.DecodeTextureToBitmap((Texture)texSec.obj))
+            Texture tx = (Texture)texSec.obj;
+            if (tx.textureType == 21)   // raw bitmap (e.g. the 512x16 slot-4 tint palette): blob is w*h*4 RGBA
+            {
+                byte[] blob = tx.texData != null ? tx.texData.blob : null;
+                if (blob == null || tx.width <= 0 || tx.height <= 0) return null;
+                w = tx.width; h = tx.height;
+                byte[] rraw = new byte[w * h * 4];
+                Array.Copy(blob, 0, rraw, 0, Math.Min(rraw.Length, blob.Length));
+                return rraw;
+            }
+            using (var bmp = GltfConverter.DecodeTextureToBitmap(tx))
             {
                 if (bmp == null) return null;
                 w = bmp.Width; h = bmp.Height;
