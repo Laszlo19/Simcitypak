@@ -739,11 +739,54 @@ namespace SimCityPak.Cli
         /// is linear) so a PBR viewer lights them. Returns vCount*4 RGBA bytes, or null when the
         /// model has no palette (non-facade meshes keep their normal textures). Gated by
         /// --facade-color while under development.</summary>
+        /// <summary>Export path: per-vertex facade colour, gated behind --facade-color.</summary>
         private static byte[] ResolvePerVertexColor(RW4Mesh mesh, Dictionary<uint, DatabaseIndex> lookup)
+        {
+            if (!_facadeColorExperimental) return null;
+            return ComputeFacadeVertexColorsCore(mesh, lookup);
+        }
+
+        /// <summary>Public: per-vertex facade palette colour (RGBA bytes, length vCount*4), resolving
+        /// the mesh's slot-4 tint palette against the given resources (e.g. all loaded packages).
+        /// Null when the mesh has no facade palette. Used by the in-app 3D viewer to show buildings
+        /// in colour — WPF's Viewport3D has no custom shaders, so the palette colour is fed in as a
+        /// per-vertex colour (via a 1-D colour texture), the same colour the glTF export bakes.</summary>
+        public static byte[] ComputeFacadeVertexColors(RW4Mesh mesh, IEnumerable<DatabaseIndex> indices)
+        {
+            if (mesh == null || indices == null) return null;
+            return ComputeFacadeVertexColorsCore(mesh, BuildTextureLookup(indices));
+        }
+
+        /// <summary>Public: the mesh's slot-4 tint palette as RGBA (and its size), resolved against
+        /// the given resources, or null if the mesh has no facade palette. The in-app 3D viewer
+        /// uses this as the diffuse texture and feeds each vertex's palette coordinate
+        /// (COLOR.r = column, COLOR.g = material row) as its UV, so WPF samples the facade colour
+        /// without a custom shader.</summary>
+        public static byte[] GetFacadePaletteRgba(RW4Mesh mesh, IEnumerable<DatabaseIndex> indices, out int width, out int height)
+        {
+            width = 0; height = 0;
+            if (mesh == null || mesh.model == null || indices == null) return null;
+            var lookup = BuildTextureLookup(indices);
+            foreach (RW4Section s in mesh.model.Sections)
+            {
+                RW4Material mat = s.obj as RW4Material;
+                if (mat == null || mat.Materials == null) continue;
+                foreach (var mr in mat.Materials)
+                {
+                    if (mr.Unknown1 != 4 || mr.TextureInstanceId == 0) continue;   // slot4 = tint palette
+                    DatabaseIndex tdi;
+                    if (!lookup.TryGetValue(mr.TextureInstanceId, out tdi)) continue;
+                    byte[] rgba = DecodeTextureResourceRgba(tdi, out width, out height);
+                    if (rgba != null) return rgba;
+                }
+            }
+            return null;
+        }
+
+        private static byte[] ComputeFacadeVertexColorsCore(RW4Mesh mesh, Dictionary<uint, DatabaseIndex> lookup)
         {
             try
             {
-                if (!_facadeColorExperimental) return null;
                 if (lookup == null || mesh == null || mesh.model == null || mesh.vertices == null || mesh.vertices.vertices == null) return null;
 
                 // The real facade colour palette is material slot u1=4 (the 512x16 "tint lookup"

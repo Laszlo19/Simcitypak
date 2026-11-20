@@ -140,7 +140,41 @@ namespace SimCityPak
                             meshMain.TriangleIndices.Add((int)t.k);
                         }
 
-
+                        // Facade colour: SimCity building meshes carry no usable texture, but their
+                        // per-vertex D3DCOLOR indexes the slot-4 tint palette. WPF Viewport3D has no
+                        // custom shaders, so show the colour by using the palette itself as the
+                        // diffuse texture and each vertex's palette coordinate (COLOR.r = column,
+                        // COLOR.g = material row) as its UV — WPF then samples the facade colour.
+                        try
+                        {
+                            int pw, ph;
+                            byte[] palRgba = Cli.CliRunner.GetFacadePaletteRgba(mesh,
+                                SimCityPak.PackageReader.DatabaseManager.Instance.Indices, out pw, out ph);
+                            if (palRgba != null && pw > 0 && ph > 0)
+                            {
+                                var palBmp = new WriteableBitmap(pw, ph, 96, 96, PixelFormats.Bgra32, null);
+                                byte[] bgra = new byte[pw * ph * 4];
+                                for (int i = 0; i < pw * ph; i++)
+                                {
+                                    bgra[i * 4]     = palRgba[i * 4 + 2]; // B
+                                    bgra[i * 4 + 1] = palRgba[i * 4 + 1]; // G
+                                    bgra[i * 4 + 2] = palRgba[i * 4];     // R
+                                    bgra[i * 4 + 3] = 255;
+                                }
+                                palBmp.WritePixels(new Int32Rect(0, 0, pw, ph), bgra, pw * 4, 0);
+                                palBmp.Freeze();
+                                meshMain.TextureCoordinates.Clear();
+                                foreach (var vtx in mesh.vertices.vertices)
+                                {
+                                    float cr = 0, cg = 0;
+                                    var col = vtx.VertexComponents.FirstOrDefault(c => c.Usage == D3DDECLUSAGE.D3DDECLUSAGE_COLOR) as VertexD3DColorValue;
+                                    if (col != null) { cr = col.R / 255f; cg = col.G / 255f; }
+                                    meshMain.TextureCoordinates.Add(new System.Windows.Point(cr, cg));
+                                }
+                                matDiffuseMain.Brush = new ImageBrush(palBmp) { Stretch = Stretch.Fill };
+                            }
+                        }
+                        catch (Exception ex) { Logger.Exception("ViewMesh facade colour", ex); }
                     }
                 }
                 catch (Exception ex)
