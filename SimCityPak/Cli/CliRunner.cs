@@ -74,7 +74,7 @@ namespace SimCityPak.Cli
         // decoded .b the sub-row. Verified on the Berlin TV Tower — swapping makes the dominant wall
         // tile (127,255,0) render as bright concrete instead of black. On by default;
         // --bake-no-swapgb disables it for diagnostics.
-        private static bool _bakeSwapGB = true;
+        private static bool _bakeSwapGB = false;
 
         // Top-layer (window-motif) blend in the facade bake is on by default; --bake-no-top disables
         // it to compare against the base-layer-only output.
@@ -83,6 +83,11 @@ namespace SimCityPak.Cli
         // uPaletteRow base for the bake (which of slot4's 16 rows the palette lookup starts on).
         // OpenSCP uses 0 for buildings; --bake-row N tests other rows while diagnosing wrong hues.
         private static int _bakeRow = 0;
+
+        // Which decoded mask channel supplies the per-texel brightness (mask*2). Default 'b' = the
+        // standard building4 meaning (now that SwapRedBlue fixes the BGRA decode). Diagnostic override
+        // --bake-bright r|g|b.
+        private static char _bakeBrightChan = 'b';
 
         [DllImport("kernel32.dll")]
         private static extern bool AttachConsole(int dwProcessId);
@@ -131,6 +136,9 @@ namespace SimCityPak.Cli
             if (args != null && args.Any(a => a.Equals("--bake-no-swapgb", StringComparison.OrdinalIgnoreCase))) _bakeSwapGB = false;
             _noTopLayer = args != null && args.Any(a => a.Equals("--bake-no-top", StringComparison.OrdinalIgnoreCase));
             _bakeRow = GetIntArg(args, "--bake-row", 0);
+            for (int i = 0; args != null && i < args.Length - 1; i++)
+                if (args[i].Equals("--bake-bright", StringComparison.OrdinalIgnoreCase))
+                { var ch = args[i + 1].Trim().ToLowerInvariant(); if (ch.Length > 0 && (ch[0] == 'r' || ch[0] == 'g' || ch[0] == 'b')) _bakeBrightChan = ch[0]; }
 
             try
             {
@@ -1162,24 +1170,26 @@ namespace SimCityPak.Cli
                             float xfZ = prm[(prw + col) * 4 + 2], xfW = prm[(prw + col) * 4 + 3];
                             float mu = Frac(tu) * xfX + xfZ, mv = Frac(tv) * xfY + xfW;
                             float mR, mG, mB; byte mA; SampleRgbaWrap(mask, mw, mh, mu, mv, out mR, out mG, out mB, out mA);
+                            float rawR = mR, rawG = mG, rawB = mB;
                             if (_bakeSwapGB) { float tmp = mG; mG = mB; mB = tmp; }
+                            float brightBase = (_bakeBrightChan == 'r' ? rawR : (_bakeBrightChan == 'b' ? rawB : rawG)) * 2f;
                             int oi = (py * atlas + px) * 4;
                             if (_bakeDebug == 1)       // raw sampled mask RGB
                             {
-                                img[oi] = ToByteClamp(mR); img[oi + 1] = ToByteClamp(mG); img[oi + 2] = ToByteClamp(mB); img[oi + 3] = 255;
+                                img[oi] = ToByteClamp(rawR); img[oi + 1] = ToByteClamp(rawG); img[oi + 2] = ToByteClamp(rawB); img[oi + 3] = 255;
                             }
-                            else if (_bakeDebug == 2)  // sampled brightness (mask.b*2) as grey
+                            else if (_bakeDebug == 2)  // sampled brightness as grey
                             {
-                                byte gg = ToByteClamp(mB * 2f); img[oi] = gg; img[oi + 1] = gg; img[oi + 2] = gg; img[oi + 3] = 255;
+                                byte gg = ToByteClamp(brightBase); img[oi] = gg; img[oi + 1] = gg; img[oi + 2] = gg; img[oi + 3] = 255;
                             }
                             else
                             {
-                                // BASE layer: palette[palOrigin.x + mask.r/512, mask.g/16] * (mask.b*2)
+                                // BASE layer: palette[palOrigin.x + mask.r/512, mask.g/16] * brightness
                                 float palU = palOx + mR * (1f / 512f) + 1f / 1024f;
                                 float palV = (_bakeRow + mG) * (1f / 16f) + 1f / 32f;
                                 if (palU < 0f) palU = 0f; else if (palU > 1f) palU = 1f;
                                 float[] cBase = SamplePaletteBilinear(pal, pw, ph, palU, palV);
-                                float mulBase = mB * 2f;
+                                float mulBase = brightBase;
 
                                 // TOP layer (window motifs): second UV, regionXform2 (row2) + tilePadding
                                 // (row3.xy), palette column = palOrigin.y (palU2); blended by the top
@@ -1203,6 +1213,7 @@ namespace SimCityPak.Cli
                                         float cyy = rsy < 0f ? 0f : (rsy > 1f ? 1f : rsy);
                                         float tuTop = cxx * x2X + x2Z, tvTop = cyy * x2Y + x2W;
                                         float fR, fG, fB; byte fA; SampleRgbaWrap(mask, mw, mh, tuTop, tvTop, out fR, out fG, out fB, out fA);
+                                        float frawR = fR, frawG = fG, frawB = fB;
                                         if (_bakeSwapGB) { float tmp = fG; fG = fB; fB = tmp; }
                                         scFacade = outside > 0f ? 0f : fA / 255f;
                                         if (scFacade > 0f)
@@ -1211,7 +1222,8 @@ namespace SimCityPak.Cli
                                             if (palUtop < 0f) palUtop = 0f; else if (palUtop > 1f) palUtop = 1f;
                                             float palVtop = (_bakeRow + fG) * (1f / 16f) + 1f / 32f;
                                             float[] cTop = SamplePaletteBilinear(pal, pw, ph, palUtop, palVtop);
-                                            tr = cTop[0]; tg = cTop[1]; tb = cTop[2]; mulTop = fB * 2f;
+                                            tr = cTop[0]; tg = cTop[1]; tb = cTop[2];
+                                            mulTop = (_bakeBrightChan == 'r' ? frawR : (_bakeBrightChan == 'b' ? frawB : frawG)) * 2f;
                                         }
                                     }
                                 }
@@ -1534,7 +1546,9 @@ namespace SimCityPak.Cli
                 if (rw == 0 || rh == 0 || 28L + blockSize > data.Length) return null;
                 w = (int)rw; h = (int)rh;
                 byte[] rgba = new byte[w * h * 4];
-                Array.Copy(data, 28, rgba, 0, Math.Min(rgba.Length, (int)blockSize));   // stored R,G,B,A
+                int ncopy = Math.Min(rgba.Length, (int)blockSize);
+                Array.Copy(data, 28, rgba, 0, ncopy);
+                SwapRedBlue(rgba, ncopy);   // raw rasters (pf21) are stored B,G,R,A, not R,G,B,A
                 return rgba;
             }
             // RW4-wrapped texture: find its Texture section and DXT-decode it.
@@ -1549,7 +1563,9 @@ namespace SimCityPak.Cli
                 if (blob == null || tx.width <= 0 || tx.height <= 0) return null;
                 w = tx.width; h = tx.height;
                 byte[] rraw = new byte[w * h * 4];
-                Array.Copy(blob, 0, rraw, 0, Math.Min(rraw.Length, blob.Length));
+                int ncopy = Math.Min(rraw.Length, blob.Length);
+                Array.Copy(blob, 0, rraw, 0, ncopy);
+                SwapRedBlue(rraw, ncopy);   // raw bitmaps (tt21) are stored B,G,R,A, not R,G,B,A
                 return rraw;
             }
             using (var bmp = GltfConverter.DecodeTextureToBitmap(tx))
@@ -1577,6 +1593,14 @@ namespace SimCityPak.Cli
                 rgba[i * 4 + 3] = bgra[i * 4 + 3];
             }
             return rgba;
+        }
+
+        /// <summary>Swaps the R and B bytes of an RGBA buffer in place (SimCity's raw rasters store
+        /// B,G,R,A). <paramref name="count"/> bounds how much was actually filled.</summary>
+        private static void SwapRedBlue(byte[] rgba, int count)
+        {
+            int n = Math.Min(count, rgba.Length);
+            for (int i = 0; i + 2 < n; i += 4) { byte t = rgba[i]; rgba[i] = rgba[i + 2]; rgba[i + 2] = t; }
         }
 
         private static uint BE(byte[] b, int o) { return (uint)((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]); }
