@@ -690,10 +690,15 @@ namespace SporeMaster.RenderWare4
                 int idxOffset = (int)bin.Position;
                 for (int i = 0; i < vCount; i++) bw.Write((uint)i);
                 int idxLen = vCount * 4;
-                Pad4(bw, bin);
-                int imgOffset = (int)bin.Position;
-                bw.Write(baseColorPng);
-                int imgLen = baseColorPng.Length;
+                bool embedTexture = baseColorPng != null;
+                int imgOffset = 0, imgLen = 0;
+                if (embedTexture)
+                {
+                    Pad4(bw, bin);
+                    imgOffset = (int)bin.Position;
+                    bw.Write(baseColorPng);
+                    imgLen = baseColorPng.Length;
+                }
                 bw.Flush();
                 byte[] binData = bin.ToArray();
 
@@ -702,9 +707,10 @@ namespace SporeMaster.RenderWare4
                     new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = posOffset,  ["byteLength"] = posLen,  ["target"] = TARGET_ARRAY },
                     new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = normOffset, ["byteLength"] = normLen, ["target"] = TARGET_ARRAY },
                     new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = uvOffset,   ["byteLength"] = uvLen,   ["target"] = TARGET_ARRAY },
-                    new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = idxOffset,  ["byteLength"] = idxLen,  ["target"] = TARGET_ELEMENT },
-                    new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = imgOffset,  ["byteLength"] = imgLen }
+                    new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = idxOffset,  ["byteLength"] = idxLen,  ["target"] = TARGET_ELEMENT }
                 };
+                if (embedTexture)
+                    bufferViews.Add(new Dictionary<string, object> { ["buffer"] = 0, ["byteOffset"] = imgOffset, ["byteLength"] = imgLen });
                 var accessors = new List<object>
                 {
                     new Dictionary<string, object> { ["bufferView"] = 0, ["componentType"] = COMP_FLOAT, ["count"] = vCount, ["type"] = "VEC3", ["min"] = new object[] { min[0], min[1], min[2] }, ["max"] = new object[] { max[0], max[1], max[2] } },
@@ -712,16 +718,11 @@ namespace SporeMaster.RenderWare4
                     new Dictionary<string, object> { ["bufferView"] = 2, ["componentType"] = COMP_FLOAT, ["count"] = vCount, ["type"] = "VEC2" },
                     new Dictionary<string, object> { ["bufferView"] = 3, ["componentType"] = COMP_UINT,  ["count"] = vCount, ["type"] = "SCALAR" }
                 };
-                var material = new Dictionary<string, object>
+                var primitive = new Dictionary<string, object>
                 {
-                    ["pbrMetallicRoughness"] = new Dictionary<string, object>
-                    {
-                        ["baseColorTexture"] = new Dictionary<string, object> { ["index"] = 0 },
-                        ["metallicFactor"] = 0.0, ["roughnessFactor"] = 1.0
-                    },
-                    ["name"] = "facade_baked"
+                    ["attributes"] = new Dictionary<string, object> { ["POSITION"] = 0, ["NORMAL"] = 1, ["TEXCOORD_0"] = 2 },
+                    ["indices"] = 3, ["mode"] = MODE_TRIANGLES
                 };
-                if (cutout) { material["alphaMode"] = "MASK"; material["alphaCutoff"] = 0.5; material["doubleSided"] = true; }
                 object[] upRotation = new object[] { -0.70710678, 0.0, 0.0, 0.70710678 };
                 var root = new Dictionary<string, object>
                 {
@@ -729,18 +730,29 @@ namespace SporeMaster.RenderWare4
                     ["scene"] = 0,
                     ["scenes"] = new object[] { new Dictionary<string, object> { ["nodes"] = new object[] { 0 } } },
                     ["nodes"] = new object[] { new Dictionary<string, object> { ["rotation"] = upRotation, ["mesh"] = 0 } },
-                    ["meshes"] = new object[] { new Dictionary<string, object> {
-                        ["primitives"] = new object[] { new Dictionary<string, object> {
-                            ["attributes"] = new Dictionary<string, object> { ["POSITION"] = 0, ["NORMAL"] = 1, ["TEXCOORD_0"] = 2 },
-                            ["indices"] = 3, ["mode"] = MODE_TRIANGLES, ["material"] = 0 } } } },
-                    ["materials"] = new object[] { material },
-                    ["textures"] = new object[] { new Dictionary<string, object> { ["sampler"] = 0, ["source"] = 0 } },
-                    ["images"] = new object[] { new Dictionary<string, object> { ["bufferView"] = 4, ["mimeType"] = "image/png" } },
-                    ["samplers"] = new object[] { new Dictionary<string, object> { ["magFilter"] = 9729, ["minFilter"] = 9987, ["wrapS"] = 33071, ["wrapT"] = 33071 } },
+                    ["meshes"] = new object[] { new Dictionary<string, object> { ["primitives"] = new object[] { primitive } } },
                     ["bufferViews"] = bufferViews,
                     ["accessors"] = accessors,
                     ["buffers"] = new object[] { new Dictionary<string, object> { ["byteLength"] = binData.Length } }
                 };
+                if (embedTexture)
+                {
+                    var material = new Dictionary<string, object>
+                    {
+                        ["pbrMetallicRoughness"] = new Dictionary<string, object>
+                        {
+                            ["baseColorTexture"] = new Dictionary<string, object> { ["index"] = 0 },
+                            ["metallicFactor"] = 0.0, ["roughnessFactor"] = 1.0
+                        },
+                        ["name"] = "facade_baked"
+                    };
+                    if (cutout) { material["alphaMode"] = "MASK"; material["alphaCutoff"] = 0.5; material["doubleSided"] = true; }
+                    primitive["material"] = 0;
+                    root["materials"] = new object[] { material };
+                    root["textures"] = new object[] { new Dictionary<string, object> { ["sampler"] = 0, ["source"] = 0 } };
+                    root["images"] = new object[] { new Dictionary<string, object> { ["bufferView"] = 4, ["mimeType"] = "image/png" } };
+                    root["samplers"] = new object[] { new Dictionary<string, object> { ["magFilter"] = 9729, ["minFilter"] = 9987, ["wrapS"] = 33071, ["wrapT"] = 33071 } };
+                }
                 WriteGlb(fileName, JsonConvert.SerializeObject(root), binData);
             }
         }
@@ -751,7 +763,7 @@ namespace SporeMaster.RenderWare4
         /// Finds the model's primary block-compressed texture and returns it as PNG bytes,
         /// or null if there's no usable texture. Never throws.
         /// </summary>
-        private static byte[] TryGetDiffusePng(RW4Mesh mesh)
+        public static byte[] TryGetDiffusePng(RW4Mesh mesh)
         {
             try
             {

@@ -302,6 +302,48 @@ namespace SimCityPak
             }
         }
 
+        private void mnuExportGltf_Click(object sender, RoutedEventArgs e)
+        {
+            SaveFileDialog dlg = new SaveFileDialog();
+            dlg.DefaultExt = ".glb";
+            dlg.Filter = "glTF Binary|*.glb";
+            dlg.FileName = MainWindow.SelectedExportName;
+            if (dlg.ShowDialog().GetValueOrDefault(false))
+            using (MainWindow.Busy("Exporting glTF…"))
+            {
+                RW4Mesh mesh = GetSelectedMesh();
+                if (mesh != null) SimCityPak.Cli.CliRunner.ExportModelForGui(mesh, dlg.FileName);
+            }
+        }
+
+        private void mnuExportGltfSplit_Click(object sender, RoutedEventArgs e)
+        {
+            SaveFileDialog dlg = new SaveFileDialog();
+            dlg.DefaultExt = ".glb";
+            dlg.Filter = "glTF Binary|*.glb";
+            dlg.FileName = MainWindow.SelectedExportName;
+            if (dlg.ShowDialog().GetValueOrDefault(false))
+            using (MainWindow.Busy("Exporting glTF + textures…"))
+            {
+                RW4Mesh mesh = GetSelectedMesh();
+                if (mesh == null) return;
+                var files = SimCityPak.Cli.CliRunner.ExportSplitTexturesForGui(mesh, dlg.FileName);
+                System.Windows.MessageBox.Show(
+                    "Exported bare mesh (no textures applied):\n" + dlg.FileName +
+                    "\n\nplus " + files.Count + " texture file(s):\n" +
+                    string.Join("\n", files.Select(System.IO.Path.GetFileName)),
+                    "Export complete");
+            }
+        }
+
+        /// <summary>The RW4Mesh of the currently selected model section, or null.</summary>
+        private RW4Mesh GetSelectedMesh()
+        {
+            var sectionView = this.DataContext as RW4ModelSectionView;
+            if (sectionView == null) return null;
+            return sectionView.Section != null ? sectionView.Section.obj as RW4Mesh : null;
+        }
+
         private void mnuImportCollada_Click(object sender, RoutedEventArgs e)
         {
             OpenFileDialog dlg = new OpenFileDialog();

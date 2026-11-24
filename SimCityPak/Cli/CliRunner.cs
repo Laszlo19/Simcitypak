@@ -61,6 +61,11 @@ namespace SimCityPak.Cli
         // export-all; --no-facade-bake disables it to fall back to the per-vertex palette colour.
         private static bool _noFacadeBake = false;
 
+        // --split-textures: export each model as a bare mesh (geometry + UV, NO embedded textures)
+        // plus sibling texture files named after the mesh with channel suffixes (_d diffuse, _n
+        // normal, _s specular). Facade buildings get the baked diffuse atlas as _d.
+        private static bool _splitTextures = false;
+
         // Debug: 0 = normal composite; 1 = write the sampled slot1 mask.rgb; 2 = write sampled
         // mask.b (brightness) as grey. Set via --bake-debug N. Used to diagnose the tUv mapping.
         private static int _bakeDebug = 0;
@@ -130,6 +135,7 @@ namespace SimCityPak.Cli
             _facadeVariation = GetIntArg(args, "--variation", 0);
             _facadeColorExperimental = args != null && args.Any(a => a.Equals("--facade-color", StringComparison.OrdinalIgnoreCase));
             _noFacadeBake = args != null && args.Any(a => a.Equals("--no-facade-bake", StringComparison.OrdinalIgnoreCase));
+            _splitTextures = args != null && args.Any(a => a.Equals("--split-textures", StringComparison.OrdinalIgnoreCase) || a.Equals("--separate-textures", StringComparison.OrdinalIgnoreCase));
             _bakeDebug = GetIntArg(args, "--bake-debug", 0);
             _bakeFlipV = args != null && args.Any(a => a.Equals("--bake-flipv", StringComparison.OrdinalIgnoreCase));
             _bakeUvZw = args != null && args.Any(a => a.Equals("--bake-uvzw", StringComparison.OrdinalIgnoreCase));
@@ -200,7 +206,9 @@ namespace SimCityPak.Cli
             Console.WriteLine("  export-obj     : RW4 models   -> Wavefront .obj  (<name>[_meshN].obj)");
             Console.WriteLine("  export-gltf    : RW4 models   -> binary glTF .glb (<name>[_meshN].glb), with the");
             Console.WriteLine("                   model's base color + normal + specular maps resolved from its");
-            Console.WriteLine("                   material (searches sibling packages; override --textures <pkg|dir>)");
+            Console.WriteLine("                   material (searches sibling packages; override --textures <pkg|dir>).");
+            Console.WriteLine("                   --split-textures: write a bare mesh (no embedded textures) plus");
+            Console.WriteLine("                   sibling files <name>_d/_n/_s.png (diffuse/normal/specular).");
             Console.WriteLine("  export-texture : RW4 textures -> images (--format png|jpg|tga|dds, default png)");
             Console.WriteLine("  export-prop    : .prop property lists -> readable .txt (or .json with --json),");
             Console.WriteLine("                   property names resolved; --combine merges an asset's model +");
@@ -766,6 +774,8 @@ namespace SimCityPak.Cli
         /// standard export (real textures where available, else per-vertex palette colour).</summary>
         private static void ExportGltfModel(RW4Mesh m, string path, Dictionary<uint, DatabaseIndex> texLookup)
         {
+            if (_splitTextures) { ExportGltfModelSplit(m, path, texLookup); return; }
+
             float[] pos, norm, uv; int vc; byte[] atlas; bool cut;
             if (!_noFacadeBake && BakeFacadeDiffuse(m, texLookup, out pos, out norm, out uv, out vc, out atlas, out cut)
                 && atlas != null && vc > 0)
@@ -774,6 +784,58 @@ namespace SimCityPak.Cli
                 return;
             }
             new GltfConverter(mesh => ResolveTextures(mesh, texLookup), mesh => ResolvePerVertexColor(mesh, texLookup)).Export(m, path);
+        }
+
+        /// <summary>Public entry for the GUI: split-export one mesh to <paramref name="glbPath"/>
+        /// (bare geometry + UV) plus sibling texture files (_d/_n/_s), resolving textures from the
+        /// currently loaded packages (DatabaseManager). Returns the texture files written.</summary>
+        public static List<string> ExportSplitTexturesForGui(RW4Mesh mesh, string glbPath)
+        {
+            var lookup = BuildViewerLookup(SimCityPak.PackageReader.DatabaseManager.Instance.Indices, null);
+            return ExportGltfModelSplit(mesh, glbPath, lookup);
+        }
+
+        /// <summary>Public entry for the GUI: export one mesh to a single .glb with textures baked in
+        /// (facade diffuse bake, or real maps), resolving textures from the loaded packages.</summary>
+        public static void ExportModelForGui(RW4Mesh mesh, string glbPath)
+        {
+            var lookup = BuildViewerLookup(SimCityPak.PackageReader.DatabaseManager.Instance.Indices, null);
+            bool prevSplit = _splitTextures;
+            _splitTextures = false;
+            try { ExportGltfModel(mesh, glbPath, lookup); }
+            finally { _splitTextures = prevSplit; }
+        }
+
+        /// <summary>Exports a model as a bare mesh (geometry + UV, NO embedded textures) plus sibling
+        /// texture files named after the mesh with channel suffixes: <c>_d</c> diffuse, <c>_n</c>
+        /// normal, <c>_s</c> specular. Facade buildings write the baked diffuse atlas as <c>_d</c>
+        /// (its UVs are the bake atlas); other models write their resolved real maps. Returns the
+        /// list of texture files written.</summary>
+        private static List<string> ExportGltfModelSplit(RW4Mesh m, string path, Dictionary<uint, DatabaseIndex> texLookup)
+        {
+            var written = new List<string>();
+            string dir = Path.GetDirectoryName(path) ?? "";
+            string stem = Path.Combine(dir, Path.GetFileNameWithoutExtension(path));
+
+            // Facade: bare mesh with the bake atlas' UVs + the baked diffuse as _d.
+            float[] pos, norm, uv; int vc; byte[] atlas; bool cut;
+            if (!_noFacadeBake && BakeFacadeDiffuse(m, texLookup, out pos, out norm, out uv, out vc, out atlas, out cut)
+                && atlas != null && vc > 0)
+            {
+                GltfConverter.WriteBakedFacadeGlb(path, pos, norm, uv, vc, null, cut);   // null -> no embedded texture
+                string d = stem + "_d.png"; File.WriteAllBytes(d, atlas); written.Add(d);
+                return written;
+            }
+
+            // Non-facade: bare mesh (geometry + UV only) + resolved real maps. Diffuse falls back to
+            // the model's INTERNAL texture (same as the embedded export) when no external map resolves.
+            new GltfConverter(null, null).Export(m, path);
+            var tex = ResolveTextures(m, texLookup);
+            byte[] diffuse = tex != null && tex.BaseColor != null ? tex.BaseColor : GltfConverter.TryGetDiffusePng(m);
+            if (diffuse != null) { string f = stem + "_d.png"; File.WriteAllBytes(f, diffuse); written.Add(f); }
+            if (tex != null && tex.Normal != null)   { string f = stem + "_n.png"; File.WriteAllBytes(f, tex.Normal);   written.Add(f); }
+            if (tex != null && tex.Specular != null) { string f = stem + "_s.png"; File.WriteAllBytes(f, tex.Specular); written.Add(f); }
+            return written;
         }
 
         private static GltfConverter.MaterialTextures ResolveTextures(RW4Mesh mesh, Dictionary<uint, DatabaseIndex> lookup)

@@ -45,6 +45,8 @@
                 </MenuItem>
                 <MenuItem Header="Export" >
                     <MenuItem Header="Wavefront .OBJ" Name="mnuExportOBJ" Click="mnuExportOBJ_Click" />
+                    <MenuItem Header="glTF .GLB (textures baked in)" Name="mnuExportGltf" Click="mnuExportGltf_Click" />
+                    <MenuItem Header="glTF .GLB + separate textures (_d/_n/_s)" Name="mnuExportGltfSplit" Click="mnuExportGltfSplit_Click" />
                 </MenuItem>
                 <Separator Width="3" IsEnabled="False" />
                 <MenuItem Header="Textures" >
